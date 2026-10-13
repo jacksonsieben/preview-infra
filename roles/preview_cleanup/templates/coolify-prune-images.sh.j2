@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Managed by Ansible (preview-infra). Removes images of Coolify applications
+# that no container uses: every preview image (tag pr-*), and regular images
+# beyond the newest {{ preview_cleanup_images_to_keep }} per application.
+# Images that are not Coolify's are left alone.
+set -euo pipefail
+
+keep={{ preview_cleanup_images_to_keep }}
+
+in_use=$(docker ps -a --format '{{ '{{' }}.Image{{ '}}' }}' | sort -u)
+apps=$(docker ps -a --filter label=coolify.type=application \
+  --format '{{ '{{' }}.Label "coolify.applicationUuid"{{ '}}' }}' | sort -u)
+
+for app in $apps; do
+  kept=0
+  # Newest first.
+  while read -r image; do
+    [ -n "$image" ] || continue
+    grep -qxF "$image" <<<"$in_use" && continue
+    if [[ $image != "$app:pr-"* ]] && (( kept < keep )); then
+      kept=$((kept + 1))
+      continue
+    fi
+    echo "Removing $image"
+    docker image rm "$image" >/dev/null || echo "Could not remove $image" >&2
+  done < <(docker images "$app" --format '{{ '{{' }}.CreatedAt{{ '}}' }}|{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}' | sort -r | cut -d'|' -f2)
+done
+
+{% if preview_cleanup_build_cache_max %}
+docker builder prune -f --max-used-space {{ preview_cleanup_build_cache_max }}
+{% endif %}

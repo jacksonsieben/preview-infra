@@ -1,0 +1,48 @@
+---
+- name: Install the Coolify image cleanup script
+  ansible.builtin.template:
+    src: coolify-prune-images.sh.j2
+    dest: /usr/local/bin/coolify-prune-images
+    mode: "0755"
+
+- name: Install the cleanup service and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - coolify-prune-images.service
+    - coolify-prune-images.timer
+  notify: Reload systemd
+
+- name: Apply systemd changes before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the cleanup timer
+  ansible.builtin.systemd_service:
+    name: coolify-prune-images.timer
+    enabled: true
+    state: started
+
+# Coolify keeps these in its database, so they go through its own models. The
+# command prints "changed" only when it had to write something.
+- name: Set Coolify's own Docker cleanup for this host
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        $s = App\Models\Server::find(0)->settings;
+        $s->force_docker_cleanup = {{ 'true' if preview_host_dedicated else 'false' }};
+        {% if not preview_host_dedicated %}
+        $s->docker_cleanup_threshold = {{ coolify_cleanup_threshold_on_shared_host }};
+        {% endif %}
+        echo $s->isDirty() ? 'changed' : 'ok';
+        $s->save();
+  register: coolify_cleanup_settings
+  changed_when: "'changed' in coolify_cleanup_settings.stdout"

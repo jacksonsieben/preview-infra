@@ -1,0 +1,22 @@
+---
+- name: Preview host
+  hosts: preview
+  become: true
+  pre_tasks:
+    - name: Check the settings
+      ansible.builtin.assert:
+        that:
+          - domain != 'example.com'
+          - cloudflare_api_token | length > 0
+        fail_msg: >-
+          Set your domain and secrets first: cp local.example.yml
+          group_vars/all/local.yml, edit it, and set CLOUDFLARE_API_TOKEN or
+          cloudflare_api_token_ref (README, Step 2).
+        quiet: true
+      no_log: true
+  roles:
+    - coolify
+    - role: tailscale_dashboard
+      when: coolify_dashboard == 'tailscale'
+    - cloudflare_tunnel
+    - preview_cleanup

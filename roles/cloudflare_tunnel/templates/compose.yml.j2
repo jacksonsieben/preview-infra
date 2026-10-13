@@ -1,0 +1,9 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+services:
+  cloudflared:
+    image: {{ cloudflared_image }}
+    command: tunnel --no-autoupdate run
+    env_file: .env
+    # Host network so localhost:80/8000/6001/6002 are Coolify's ports.
+    network_mode: host
+    restart: unless-stopped

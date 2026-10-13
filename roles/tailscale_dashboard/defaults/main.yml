@@ -1,0 +1,12 @@
+---
+# Tailscale Serve routes for the dashboard, on https://<machine>.<tailnet>.ts.net.
+# Serve strips the mount path before proxying, so realtime and the terminal
+# get theirs back in the target. Targets use 127.0.0.1: realtime listens on
+# IPv4 only.
+tailscale_dashboard_routes:
+  - path: /
+    target: http://127.0.0.1:8000
+  - path: /app
+    target: http://127.0.0.1:6001/app
+  - path: /terminal/ws
+    target: http://127.0.0.1:6002/terminal/ws

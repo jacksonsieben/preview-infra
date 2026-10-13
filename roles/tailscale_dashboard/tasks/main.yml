@@ -1,0 +1,71 @@
+---
+# Serves the Coolify dashboard on the tailnet only. The host must already be
+# logged in to Tailscale; this role does not install or authenticate it.
+
+- name: Read the Tailscale status
+  ansible.builtin.command: tailscale status --json
+  register: tailscale_status_raw
+  changed_when: false
+
+- name: Remember the tailnet name of this host
+  ansible.builtin.set_fact:
+    tailscale_status: "{{ tailscale_status_raw.stdout | from_json }}"
+    tailscale_dns_name: "{{ (tailscale_status_raw.stdout | from_json).Self.DNSName | regex_replace('\\.$', '') }}"
+
+- name: Check that Tailscale can serve HTTPS
+  ansible.builtin.assert:
+    that:
+      - tailscale_status.BackendState == 'Running'
+      - tailscale_status.CertDomains | default([], true) | length > 0
+    fail_msg: >-
+      Tailscale must be logged in, with MagicDNS and HTTPS Certificates turned on
+      for the tailnet (https://login.tailscale.com/admin/dns).
+    quiet: true
+
+- name: Read the current Tailscale Serve routes
+  ansible.builtin.command: tailscale serve status --json
+  register: tailscale_serve_raw
+  changed_when: false
+
+- name: Serve the Coolify dashboard on the tailnet
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - serve
+      - --bg
+      - --https=443
+      - --set-path={{ item.path }}
+      - "{{ item.target }}"
+  loop: "{{ tailscale_dashboard_routes }}"
+  loop_control:
+    label: "{{ item.path }}"
+  vars:
+    tailscale_serve_handlers: >-
+      {{ (((tailscale_serve_raw.stdout | from_json).Web | default({}))[tailscale_dns_name ~ ':443']
+          | default({})).Handlers | default({}) }}
+  when: (tailscale_serve_handlers[item.path] | default({})).Proxy | default('') != item.target
+  changed_when: true
+
+# Coolify builds the links in its PR comments and notifications from the
+# instance domain. The GitHub App keeps the webhook URL it was created with
+# (coolify.<domain>/webhooks/..., still public through the tunnel).
+- name: Make the tailnet address Coolify's instance domain
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        $s = App\Models\InstanceSettings::get();
+        $s->fqdn = 'https://{{ tailscale_dns_name }}';
+        if ($s->isDirty()) {
+          $s->save();
+          App\Models\Server::find(0)->setupDynamicProxyConfiguration();
+          echo 'changed';
+        } else { echo 'ok'; }
+  register: coolify_instance_domain
+  changed_when: "'changed' in coolify_instance_domain.stdout"

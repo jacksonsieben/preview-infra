@@ -1,0 +1,6 @@
+---
+- name: Restart cloudflared
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ cloudflared_dir }}"
+  changed_when: true

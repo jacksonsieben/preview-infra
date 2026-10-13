@@ -1,0 +1,17 @@
+---
+# Debian and Ubuntu call the unit `ssh`; Arch, Fedora and others `sshd`.
+- name: Reload sshd
+  ansible.builtin.service:
+    name: "{{ 'ssh' if ansible_facts.os_family == 'Debian' else 'sshd' }}"
+    state: reloaded
+
+# Same files and project as Coolify's upgrade script, so the next upgrade keeps
+# these containers.
+- name: Recreate Coolify
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --env-file .env
+      -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.custom.yml
+      up -d --force-recreate --wait --wait-timeout 120 coolify
+    chdir: /data/coolify/source
+  changed_when: true

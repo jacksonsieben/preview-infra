@@ -1,0 +1,17 @@
+---
+# Images of each Coolify application kept for rollback, besides the one running.
+# Preview images (tag pr-*) are never kept once their container is gone.
+preview_cleanup_images_to_keep: 2
+
+# Upper bound for the BuildKit cache, trimmed least recently used first. The
+# cache is shared with every other `docker build` on the host. Empty disables.
+preview_cleanup_build_cache_max: 10GB
+
+preview_cleanup_schedule: "*-*-* 04:00"
+
+# Coolify's own scheduled cleanup removes every unused image on the host that
+# is not Coolify's, and the whole build cache. On a host that also does other
+# work, turn its daily forced run off and let it act only as an emergency when
+# the disk passes the threshold. A dedicated host keeps Coolify's defaults.
+preview_host_dedicated: false
+coolify_cleanup_threshold_on_shared_host: 95

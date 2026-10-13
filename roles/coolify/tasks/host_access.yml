@@ -1,0 +1,80 @@
+---
+# Coolify manages its own host over SSH, as root, from the `coolify` Docker
+# network. Hosts that refuse root logins or firewall port 22 (Omarchy with
+# PermitRootLogin no and ufw) get a narrow exception: root with a key, only
+# from that network. Every other client keeps the host's own rules.
+
+- name: Read the Coolify network subnet
+  ansible.builtin.command:
+    cmd: docker network inspect coolify --format {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %}
+  register: coolify_subnet
+  changed_when: false
+
+- name: Find Coolify's public keys
+  ansible.builtin.find:
+    paths: /data/coolify/ssh/keys
+    patterns: "*.pub"
+  register: coolify_pubkeys
+
+- name: Read Coolify's public keys
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ coolify_pubkeys.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  register: coolify_pubkey_content
+
+- name: Create root's SSH directory
+  ansible.builtin.file:
+    path: /root/.ssh
+    state: directory
+    mode: "0700"
+
+- name: Authorize Coolify's keys for root
+  ansible.builtin.lineinfile:
+    path: /root/.ssh/authorized_keys
+    line: "{{ item.content | b64decode | trim }}"
+    create: true
+    mode: "0600"
+  loop: "{{ coolify_pubkey_content.results }}"
+  loop_control:
+    label: "{{ item.source | basename }}"
+
+# A Match block runs to the end of the file, so it must come after every global
+# setting: append it to the main sshd_config, never to a drop-in included at
+# the top. It overrides PermitRootLogin only for the Coolify network.
+- name: Find sshd
+  ansible.builtin.shell:
+    cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
+  register: coolify_sshd_path
+  changed_when: false
+
+- name: Allow root logins with a key from the Coolify network
+  ansible.builtin.blockinfile:
+    path: /etc/ssh/sshd_config
+    marker: "# {mark} preview-infra: Coolify host access"
+    insertafter: EOF
+    block: |
+      Match Address {{ coolify_subnet.stdout }}
+          PermitRootLogin prohibit-password
+    # sshd is in /usr/sbin on Debian and Ubuntu, /usr/bin on Arch.
+    validate: "{{ coolify_sshd_path.stdout }} -t -f %s"
+  notify: Reload sshd
+
+# ufw is in /usr/sbin on Debian and Ubuntu, /usr/bin on Arch; not on PATH for
+# every user, so look in both.
+- name: Check for ufw
+  ansible.builtin.shell:
+    cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v ufw
+  register: coolify_ufw
+  changed_when: false
+  failed_when: false
+
+- name: Let the Coolify network reach SSH through ufw
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ coolify_subnet.stdout }}"
+    to_port: "22"
+    proto: tcp
+    comment: Coolify host access
+  when: coolify_ufw.rc == 0

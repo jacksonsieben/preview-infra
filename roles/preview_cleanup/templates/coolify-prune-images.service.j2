@@ -1,0 +1,8 @@
+[Unit]
+Description=Remove unused Coolify application and preview images
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/coolify-prune-images

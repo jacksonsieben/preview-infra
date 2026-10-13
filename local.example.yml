@@ -1,0 +1,21 @@
+---
+# Your own settings. Copy this file to group_vars/all/local.yml and edit it:
+#
+#   cp local.example.yml group_vars/all/local.yml
+#
+# local.yml is in .gitignore. Every setting you can change is listed, with its
+# default, in group_vars/all/defaults.yml.
+
+# A zone on your Cloudflare account. Previews land on pr-<n>-preview.<domain>.
+domain: example.com
+
+# tailscale (dashboard on your tailnet only) or public (through the tunnel).
+coolify_dashboard: tailscale
+
+# 1Password references, if you keep the secrets there. Leave them out and set
+# CLOUDFLARE_API_TOKEN, COOLIFY_ROOT_USERNAME, COOLIFY_ROOT_EMAIL and
+# COOLIFY_ROOT_PASSWORD in the environment instead.
+cloudflare_api_token_ref: op://Ansible/Cloudflare API Token - tunnel/credential
+coolify_root_ref: op://Private/Coolify
+
+# Running on another machine over SSH: put it in inventory/hosts.yml.

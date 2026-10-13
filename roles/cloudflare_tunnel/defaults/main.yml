@@ -1,0 +1,44 @@
+---
+cloudflare_api: https://api.cloudflare.com/client/v4
+cloudflare_tunnel_name: preview-host
+
+# Pin a tag (e.g. cloudflare/cloudflared:2026.9.1) for reproducible rebuilds.
+cloudflared_image: cloudflare/cloudflared:latest
+cloudflared_dir: /opt/cloudflared
+
+# Rules are matched top to bottom. Everything on the wildcard goes to Coolify's
+# Traefik, which routes by Host header to the right preview. Targets use
+# 127.0.0.1, not localhost: cloudflared tries ::1 first, and Coolify publishes
+# on IPv4 loopback only (its realtime server listens on IPv4 only anyway).
+#
+# With coolify_dashboard: tailscale, coolify.<domain> answers only GitHub's
+# webhooks; the dashboard is served on the tailnet. With `public`, the whole
+# dashboard goes through the tunnel (realtime on 6001, terminal on 6002).
+cloudflare_tunnel_coolify_ingress:
+  tailscale:
+    - hostname: "{{ coolify_hostname }}"
+      path: ^/webhooks/
+      service: http://127.0.0.1:8000
+    - hostname: "{{ coolify_hostname }}"
+      service: http_status:404
+  public:
+    - hostname: "{{ coolify_hostname }}"
+      path: ^/app/
+      service: http://127.0.0.1:6001
+    - hostname: "{{ coolify_hostname }}"
+      path: ^/terminal/ws
+      service: http://127.0.0.1:6002
+    - hostname: "{{ coolify_hostname }}"
+      service: http://127.0.0.1:8000
+
+cloudflare_tunnel_ingress: >-
+  {{ cloudflare_tunnel_coolify_ingress[coolify_dashboard] + [
+       {'hostname': preview_wildcard, 'service': 'http://127.0.0.1:80'},
+       {'service': 'http_status:404'},
+     ] }}
+
+# DNS records pointed at the tunnel. More specific records (apex, www) still win
+# over the wildcard, so production can live elsewhere.
+cloudflare_tunnel_dns_names:
+  - "{{ coolify_hostname }}"
+  - "{{ preview_wildcard }}"

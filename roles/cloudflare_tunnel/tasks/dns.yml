@@ -1,0 +1,31 @@
+---
+# Ensures one proxied CNAME `dns_name` -> <tunnel id>.cfargotunnel.com.
+
+- name: "Look up the DNS record for {{ dns_name }}"
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/zones/{{ cloudflare_zone_id }}/dns_records?name={{ dns_name | urlencode }}"
+    headers:
+      Authorization: "Bearer {{ cloudflare_api_token }}"
+  register: dns_lookup
+
+- name: "Create or update the DNS record for {{ dns_name }}"
+  ansible.builtin.uri:
+    url: >-
+      {{ cloudflare_api }}/zones/{{ cloudflare_zone_id }}/dns_records{{
+         '/' ~ dns_lookup.json.result[0].id if dns_lookup.json.result else '' }}
+    method: "{{ 'PUT' if dns_lookup.json.result else 'POST' }}"
+    headers:
+      Authorization: "Bearer {{ cloudflare_api_token }}"
+    body_format: json
+    body:
+      type: CNAME
+      name: "{{ dns_name }}"
+      content: "{{ cloudflare_tunnel_id }}.cfargotunnel.com"
+      proxied: true
+      comment: Managed by preview-infra
+  changed_when: true
+  when: >-
+    not dns_lookup.json.result
+    or dns_lookup.json.result[0].type != 'CNAME'
+    or dns_lookup.json.result[0].content != cloudflare_tunnel_id ~ '.cfargotunnel.com'
+    or not dns_lookup.json.result[0].proxied

@@ -1,0 +1,45 @@
+---
+# Coolify publishes its dashboard (8000, 6001, 6002) and its Traefik proxy
+# (80, 443) on every interface, through Docker rules that bypass ufw. Anyone on
+# the LAN could reach the dashboard on :8000, or through Traefik with a forged
+# Host header. Everything here is reached through cloudflared or Tailscale
+# Serve on 127.0.0.1, so bind them there.
+
+- name: Publish the Coolify ports on loopback only
+  ansible.builtin.template:
+    src: docker-compose.custom.yml.j2
+    dest: /data/coolify/source/docker-compose.custom.yml
+    mode: "0644"
+  notify: Recreate Coolify
+
+# Coolify keeps the proxy's compose file in its database and rewrites the file
+# on disk from there, so the change goes through its own actions. Also drops
+# the Traefik dashboard on host port 8080, which nothing here uses and which
+# collides with other local services.
+- name: Publish the Coolify proxy ports on loopback only
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        $s = App\Models\Server::find(0);
+        $c = App\Actions\Proxy\GetProxyConfiguration::run($s);
+        $n = preg_replace(
+          ['/^(\s*- )\x27(80:80|443:443|443:443\/udp)\x27$/m', '/^\s*- \x278080:8080\x27\n/m'],
+          ["\$1'127.0.0.1:\$2'", ''],
+          $c);
+        if ($n === $c) { echo 'ok'; } else {
+          App\Actions\Proxy\SaveProxyConfiguration::run($s, $n);
+          App\Actions\Proxy\StartProxy::run($s, async: false, force: true);
+          echo 'changed';
+        }
+  register: coolify_proxy_ports
+  changed_when: "'changed' in coolify_proxy_ports.stdout"
+  failed_when: >-
+    coolify_proxy_ports.rc != 0
+    or coolify_proxy_ports.stdout_lines | select('in', ['ok', 'changed']) | list | length == 0

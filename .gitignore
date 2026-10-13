@@ -1,0 +1,16 @@
+# Ansible
+*.retry
+.ansible/
+
+# Your own settings (template: local.example.yml)
+group_vars/all/local.yml
+
+# Local overrides
+.env
+*.local.yml
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+*~

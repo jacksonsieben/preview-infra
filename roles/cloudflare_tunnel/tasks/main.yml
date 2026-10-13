@@ -1,0 +1,114 @@
+---
+# A remotely managed tunnel: its routes live in Cloudflare (set here through the
+# API) and the host only runs `cloudflared` with the tunnel token. Nothing on the
+# host listens on the internet; no router port is opened.
+
+- name: Look up the Cloudflare zone
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/zones?name={{ domain }}"
+    headers: &cloudflare_headers
+      Authorization: "Bearer {{ cloudflare_api_token }}"
+  register: cloudflare_zone
+  failed_when: cloudflare_zone.json.result | length != 1
+
+- name: Remember the zone and account ids
+  ansible.builtin.set_fact:
+    cloudflare_zone_id: "{{ cloudflare_zone.json.result[0].id }}"
+    cloudflare_account_id: "{{ cloudflare_zone.json.result[0].account.id }}"
+
+- name: Look up the tunnel
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel?name={{ cloudflare_tunnel_name }}&is_deleted=false"
+    headers: *cloudflare_headers
+  register: cloudflare_tunnel_lookup
+
+- name: Create the tunnel
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel"
+    method: POST
+    headers: *cloudflare_headers
+    body_format: json
+    body:
+      name: "{{ cloudflare_tunnel_name }}"
+      config_src: cloudflare
+  register: cloudflare_tunnel_created
+  changed_when: true
+  when: cloudflare_tunnel_lookup.json.result | length == 0
+
+- name: Remember the tunnel id
+  ansible.builtin.set_fact:
+    cloudflare_tunnel_id: >-
+      {{ (cloudflare_tunnel_created.json.result
+          if cloudflare_tunnel_created is not skipped
+          else cloudflare_tunnel_lookup.json.result[0]).id }}
+
+- name: Read the current tunnel routes
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ cloudflare_tunnel_id }}/configurations"
+    headers: *cloudflare_headers
+  register: cloudflare_tunnel_config
+
+# Cloudflare adds defaults to stored rules, so compare only the fields set here.
+- name: Compare the tunnel routes
+  ansible.builtin.set_fact:
+    cloudflare_ingress_current: >-
+      {%- for r in (cloudflare_tunnel_config.json.result.config | default({}, true)).ingress | default([]) -%}
+      {{ r.hostname | default('') }}|{{ r.path | default('') }}|{{ r.service }};
+      {%- endfor -%}
+    cloudflare_ingress_wanted: >-
+      {%- for r in cloudflare_tunnel_ingress -%}
+      {{ r.hostname | default('') }}|{{ r.path | default('') }}|{{ r.service }};
+      {%- endfor -%}
+
+- name: Set the tunnel routes
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ cloudflare_tunnel_id }}/configurations"
+    method: PUT
+    headers: *cloudflare_headers
+    body_format: json
+    body:
+      config:
+        ingress: "{{ cloudflare_tunnel_ingress }}"
+  changed_when: true
+  when: cloudflare_ingress_current != cloudflare_ingress_wanted
+
+- name: Point DNS at the tunnel
+  ansible.builtin.include_tasks: dns.yml
+  loop: "{{ cloudflare_tunnel_dns_names }}"
+  loop_control:
+    loop_var: dns_name
+
+- name: Read the tunnel token
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ cloudflare_tunnel_id }}/token"
+    headers: *cloudflare_headers
+  register: cloudflare_tunnel_token
+  no_log: true
+
+- name: Create the cloudflared directory
+  ansible.builtin.file:
+    path: "{{ cloudflared_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: Write the tunnel token
+  ansible.builtin.copy:
+    content: "TUNNEL_TOKEN={{ cloudflare_tunnel_token.json.result }}\n"
+    dest: "{{ cloudflared_dir }}/.env"
+    mode: "0600"
+  no_log: true
+  notify: Restart cloudflared
+
+- name: Write the cloudflared compose file
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ cloudflared_dir }}/compose.yml"
+    mode: "0644"
+  notify: Restart cloudflared
+
+- name: Start cloudflared
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ cloudflared_dir }}"
+  register: cloudflared_up
+  changed_when: "'Started' in cloudflared_up.stderr or 'Recreated' in cloudflared_up.stderr"

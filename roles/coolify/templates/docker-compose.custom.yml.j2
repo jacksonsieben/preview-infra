@@ -1,0 +1,13 @@
+# Managed by preview-infra. Coolify's installer and upgrade script include this
+# file after their own compose files.
+#
+# Publishes the dashboard, realtime and terminal ports on loopback only. Docker
+# writes its own firewall rules for published ports and bypasses ufw, so the
+# defaults (0.0.0.0) expose the dashboard to the whole LAN. cloudflared and
+# Tailscale Serve both reach it on 127.0.0.1.
+services:
+  coolify:
+    ports: !override
+      - "127.0.0.1:8000:8080"
+      - "127.0.0.1:6001:6001"
+      - "127.0.0.1:6002:6002"

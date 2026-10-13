@@ -1,0 +1,9 @@
+---
+# Empty installs the latest release. Pin a version (e.g. 4.0.0-beta.420) to
+# make a rebuild on another machine land on the same Coolify.
+coolify_version: ""
+coolify_install_script_url: https://cdn.coollabs.io/coolify/install.sh
+
+# Distribution IDs the installer accepts. A derivative whose ID is not listed
+# runs as the first ID_LIKE entry that is.
+coolify_supported_os: [arch, ubuntu, debian, raspbian, centos, fedora, rhel, ol, rocky, sles, opensuse-leap, opensuse-tumbleweed, almalinux, amzn, alpine]

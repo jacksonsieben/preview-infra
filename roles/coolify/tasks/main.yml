@@ -1,0 +1,100 @@
+---
+# Coolify's own installer sets up Docker, the Traefik proxy and the dashboard
+# (ports 80, 443, 8000, 6001, 6002). It is not idempotent, so it runs only when
+# /data/coolify/source/.env does not exist yet. Upgrades happen from the
+# dashboard, not from here.
+
+- name: Check whether Coolify is already installed
+  ansible.builtin.stat:
+    path: /data/coolify/source/.env
+  register: coolify_env
+
+- name: Install Coolify
+  when: not coolify_env.stat.exists
+  block:
+    # Coolify silently skips creating the admin when the password fails its
+    # rules, and leaves the registration page open to whoever finds it first.
+    # Symbols are limited to `-_.` because the installer writes the value into
+    # .env with sed.
+    - name: Check the Coolify root password
+      ansible.builtin.assert:
+        that:
+          - coolify_root_password | length >= 8
+          - coolify_root_password is search('[a-z]')
+          - coolify_root_password is search('[A-Z]')
+          - coolify_root_password is search('[0-9]')
+          - coolify_root_password is search('[-_.]')
+          - coolify_root_password is not search('[^A-Za-z0-9_.-]')
+        fail_msg: >-
+          The Coolify Root password needs lower and upper case letters, a digit
+          and one of - _ . and no other symbols.
+        quiet: true
+      no_log: true
+
+    - name: Download the Coolify installer
+      ansible.builtin.get_url:
+        url: "{{ coolify_install_script_url }}"
+        dest: /root/coolify-install.sh
+        mode: "0700"
+
+    - name: Read the OS identity
+      ansible.builtin.slurp:
+        src: /etc/os-release
+      register: coolify_os_release
+
+    # The installer picks its package manager from ID alone and rejects
+    # derivatives it does not list (Omarchy reports ID=omarchy, ID_LIKE=arch).
+    # Hand it the parent distribution from ID_LIKE instead.
+    - name: Treat a derivative distribution as its parent
+      ansible.builtin.replace:
+        path: /root/coolify-install.sh
+        regexp: '^OS_TYPE=\$\(grep -w "ID" /etc/os-release.*$'
+        replace: 'OS_TYPE="{{ coolify_os_like }}"'
+      vars:
+        coolify_os_ids: "{{ (coolify_os_release.content | b64decode).splitlines() | select('match', '^ID(_LIKE)?=') | list }}"
+        coolify_os_id: "{{ coolify_os_ids | select('match', '^ID=') | first | regex_replace('^ID=\"?([^\"]*)\"?$', '\\1') }}"
+        coolify_os_like: >-
+          {{ (coolify_os_ids | select('match', '^ID_LIKE=') | first | default('ID_LIKE=')
+              | regex_replace('^ID_LIKE="?([^"]*)"?$', '\1')).split() | intersect(coolify_supported_os) | first | default('') }}
+      when:
+        - coolify_os_id not in coolify_supported_os
+        - coolify_os_like | length > 0
+
+    - name: Run the Coolify installer
+      ansible.builtin.command:
+        cmd: "bash /root/coolify-install.sh {{ coolify_version }}"
+      environment:
+        # Creates the admin account up front, so nobody else can claim the
+        # registration page while the dashboard is reachable.
+        ROOT_USERNAME: "{{ coolify_root_username }}"
+        ROOT_USER_EMAIL: "{{ coolify_root_email }}"
+        ROOT_USER_PASSWORD: "{{ coolify_root_password }}"
+      register: coolify_install
+      changed_when: true
+      failed_when: false
+      no_log: true
+
+    # The credentials only travel in the environment above; the installer's
+    # own output does not contain them, so its tail is safe to show.
+    - name: Report a failed Coolify install
+      ansible.builtin.fail:
+        msg: "{{ (coolify_install.stdout_lines + coolify_install.stderr_lines)[-25:] }}"
+      when: coolify_install.rc != 0
+
+- name: Keep Coolify off the network interfaces
+  ansible.builtin.include_tasks: loopback_ports.yml
+
+- name: Apply the Coolify port changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the Coolify dashboard
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8000/api/health
+    status_code: 200
+  register: coolify_health
+  until: coolify_health.status == 200
+  retries: 30
+  delay: 5
+
+- name: Give Coolify SSH access to this host
+  ansible.builtin.include_tasks: host_access.yml
