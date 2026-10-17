@@ -162,6 +162,15 @@ across repositories, so give each other project its own name in the template
 (`pr-{{pr_id}}-blog-preview.example.com`). The tunnel and DNS do not
 change.
 
+## Pull requests
+
+Every PR fills in `.github/pull_request_template.md`. Its *How to test* section
+must give the preview link (or the command to run locally, when there is no
+preview), numbered steps with the exact URL or command and the expected result,
+and the regressions to check. Any change to sshd, ufw, DNS or the Cloudflare
+tunnel is ticked in the risk checklist and explained. Infra PRs are never run
+for real: the check is `ansible-playbook site.yml --syntax-check`.
+
 ## Security
 
 - **Pull requests from forks run code on your machine.** On a public
