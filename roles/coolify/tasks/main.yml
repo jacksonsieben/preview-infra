@@ -31,6 +31,18 @@
         quiet: true
       no_log: true
 
+    # The installer writes it unquoted into .env too: a space ("Jane Doe")
+    # leaves a .env Laravel refuses to parse, and the dashboard answers 500.
+    - name: Check the Coolify root username
+      ansible.builtin.assert:
+        that:
+          - coolify_root_username | length > 0
+          - coolify_root_username is not search('\s')
+        fail_msg: >-
+          The Coolify Root username can't contain spaces (the installer writes it
+          unquoted into .env). Use e.g. "jackson", or set COOLIFY_ROOT_USERNAME.
+        quiet: true
+
     - name: Download the Coolify installer
       ansible.builtin.get_url:
         url: "{{ coolify_install_script_url }}"
@@ -81,6 +93,14 @@
         msg: "{{ (coolify_install.stdout_lines + coolify_install.stderr_lines)[-25:] }}"
       when: coolify_install.rc != 0
 
+# Before the port changes: the proxy is reconfigured through Coolify, which
+# reaches this host over SSH (on a fresh host ufw drops it until then).
+- name: Give Coolify SSH access to this host
+  ansible.builtin.include_tasks: host_access.yml
+
+- name: Apply the sshd changes
+  ansible.builtin.meta: flush_handlers
+
 - name: Keep Coolify off the network interfaces
   ansible.builtin.include_tasks: loopback_ports.yml
 
@@ -95,6 +115,3 @@
   until: coolify_health.status == 200
   retries: 30
   delay: 5
-
-- name: Give Coolify SSH access to this host
-  ansible.builtin.include_tasks: host_access.yml
