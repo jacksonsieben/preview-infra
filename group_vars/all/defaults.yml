@@ -15,6 +15,34 @@ domain: example.com
 coolify_hostname: "coolify.{{ domain }}"
 preview_wildcard: "*.{{ domain }}"
 
+# Hostnames that are not covered by the wildcard but should reach Coolify, for an
+# application deployed here as production. The wildcard already covers every
+# first-level name (www included); the apex is the usual one to add:
+#
+#   production_hostnames: ["{{ domain }}"]
+#
+# Each gets a tunnel route to Traefik and a proxied CNAME, which replaces any
+# record the name had. Then give the application that domain in Coolify.
+production_hostnames: []
+
+# ---------------------------------------------------------------------------
+# Applications
+#
+# Declared here, created or corrected through Coolify's API on every run. The
+# GitHub App they deploy from is the one manual step (README, Step 4): name it
+# in coolify_github_app. Each entry needs `repo` and `project`; the rest has
+# defaults in roles/coolify_apps/defaults/main.yml.
+#
+#   coolify_apps:
+#     - repo: you/site
+#       project: Site
+#       domains: ["{{ domain }}", "www.{{ domain }}"]   # served as http:// (see README)
+#       port: 8080
+#       preview_name: preview   # previews at pr-<n>-preview.<domain>
+# ---------------------------------------------------------------------------
+coolify_github_app: ""
+coolify_apps: []
+
 # Where the Coolify dashboard is reachable:
 #   tailscale  only from your tailnet, at https://<machine>.<tailnet>.ts.net.
 #              The tunnel serves just coolify.<domain>/webhooks/ for GitHub.

@@ -16,6 +16,37 @@
     cloudflare_zone_id: "{{ cloudflare_zone.json.result[0].id }}"
     cloudflare_account_id: "{{ cloudflare_zone.json.result[0].account.id }}"
 
+- name: Read the zone's Always Use HTTPS setting
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/zones/{{ cloudflare_zone_id }}/settings/always_use_https"
+    headers: *cloudflare_headers
+    status_code: [200, 403]
+  register: cloudflare_https
+  when: cloudflare_always_use_https
+
+- name: Check the token can change zone settings
+  ansible.builtin.assert:
+    that: cloudflare_https.status == 200
+    fail_msg: >-
+      The Cloudflare token can't read zone settings. Add Zone → Zone Settings →
+      Edit to it (README, Step 2), or set cloudflare_always_use_https: false and
+      turn Always Use HTTPS on in the dashboard.
+    quiet: true
+  when: cloudflare_always_use_https
+
+- name: Turn on Always Use HTTPS
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/zones/{{ cloudflare_zone_id }}/settings/always_use_https"
+    method: PATCH
+    headers: *cloudflare_headers
+    body_format: json
+    body:
+      value: "on"
+  changed_when: true
+  when:
+    - cloudflare_always_use_https
+    - cloudflare_https.json.result.value != 'on'
+
 - name: Look up the tunnel
   ansible.builtin.uri:
     url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel?name={{ cloudflare_tunnel_name }}&is_deleted=false"

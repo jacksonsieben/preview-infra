@@ -20,3 +20,5 @@
       when: coolify_dashboard == 'tailscale'
     - cloudflare_tunnel
     - preview_cleanup
+    - role: coolify_apps
+      when: coolify_apps | length > 0

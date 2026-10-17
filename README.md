@@ -72,6 +72,7 @@ Create Token → Custom token:
 | Account → Cloudflare One Connector: cloudflared | Write/Edit |
 | Zone → DNS | Edit |
 | Zone → Zone | Read |
+| Zone → Zone Settings | Edit |
 
 The tunnel permission has had several names. Any one of these is enough:
 *Cloudflare One Connector: cloudflared*, *Cloudflare One Connectors*, or the
@@ -105,9 +106,10 @@ Certificates*. The playbook stops with a message if either is missing. Set
 `coolify_dashboard: public` to skip Tailscale and serve the dashboard at
 `coolify.<domain>` instead.
 
-**Cloudflare settings for the zone.** SSL/TLS → Edge Certificates → turn on
-*Always Use HTTPS*. Coolify serves plain HTTP behind the tunnel (see
-[Why `http://`](#why-http-in-coolify)), and this makes every link HTTPS.
+**Always Use HTTPS.** The playbook turns it on for the zone (that's the *Zone
+Settings* permission above). Coolify serves plain HTTP behind the tunnel (see
+[Why `http://`](#why-http-in-coolify)), and this makes every link HTTPS. Set
+`cloudflare_always_use_https: false` to manage it in the dashboard instead.
 
 ## Step 3 — Run the playbook
 
@@ -128,39 +130,55 @@ It is idempotent; rerun it any time. Afterwards:
 
 ## Step 4 — Connect GitHub and a project
 
-In the Coolify dashboard, once:
+**The GitHub App, once per Coolify install.** GitHub only creates apps from a
+browser, so this is the one step the playbook can't do:
 
-1. **Settings → General → Instance's Domain:** the playbook already set it to
-   the tailnet address, so the links Coolify posts open only on your tailnet.
-2. **Sources → + Add → GitHub App.** Create it on your account and install
-   it only on the repositories that should get previews.
-3. Coolify registers the app's webhook at its instance domain, which GitHub
-   cannot reach. On GitHub → Settings → Developer settings → GitHub Apps →
-   your app → *Webhook URL*, change the host to the public one:
-   `https://coolify.example.com/webhooks/source/github/events`. Keep the
-   path and the secret.
+1. **Sources → New Source → GitHub App**, a name (e.g. `coolify-<machine>`),
+   *Pull request previews* on → **Register With GitHub**. Keep the webhook
+   endpoint on the instance (tailnet) address: the browser comes back to it
+   after GitHub, and you're logged in only there.
+2. GitHub opens with the app filled in: **Create GitHub App**. Back in Coolify,
+   **Install Repositories** → *Only select repositories* → the ones that should
+   deploy here. Add more later in the app's *Configure* page on GitHub.
+3. GitHub can't reach the tailnet address the app was registered with. On
+   GitHub → Settings → Developer settings → GitHub Apps → your app → *Webhook
+   URL*, change the host to the public one:
+   `https://coolify.example.com/webhooks/source/github/events`. Keep the path
+   and the secret. *Advanced → Recent Deliveries → Redeliver* on the first ping
+   should then show a green check.
 
-For each project (e.g. a website repository):
+Put the app's name in `local.yml` as `coolify_github_app`.
 
-1. **Projects → + Add → Resource → Private Repository (with GitHub App)** →
-   choose the repository and the `main` branch.
-2. **Build Pack:** Dockerfile. **Ports Exposes:** `8080`.
-3. **Domains:** `http://site.example.com`. The `main` branch is deployed
-   here and works as staging.
-4. **Advanced:** turn on *Preview Deployments* and *Auto Deploy*.
-5. **Preview Deployments → URL Template:** `pr-{{pr_id}}-preview.example.com`.
-   Keep the name to one level (`pr-36-preview.…`, not `36.preview.…`), because
-   the free certificate does not cover deeper subdomains.
-6. Set app variables under **Environment Variables**. Preview deployments
-   have their own list.
+**The projects, in `local.yml`.** Each entry of `coolify_apps` becomes a
+Coolify application, created or corrected on every run:
+
+```yaml
+coolify_github_app: coolify-preview-host
+coolify_apps:
+  - repo: you/site
+    project: Site
+    domains: ["site.{{ domain }}"]   # http:// in Coolify, see below
+    port: 8080                        # the container's port
+```
+
+From there the playbook sets the Dockerfile build pack, auto deploy on push,
+and preview deployments at `pr-<n>-preview.<domain>` for PRs from repository
+members only. An application it creates is deployed right away. Every option
+and its default is in `group_vars/all/defaults.yml` and
+`roles/coolify_apps/defaults/main.yml`. Coolify's API is enabled only for the
+run, with a token deleted at the end.
+
+- **Production on the apex.** Add the domain to `production_hostnames` (Step
+  2), and `"{{ domain }}"` (plus `www.{{ domain }}`) to the app's `domains`.
+- **More projects.** PR numbers repeat across repositories, so give each other
+  project its own `preview_name` (`blog-preview` → `pr-36-blog-preview.…`).
+  Keep it to one level (`pr-36-preview.…`, not `36.preview.…`): the free
+  certificate doesn't cover deeper subdomains. The tunnel and DNS don't change.
+- **Environment variables** stay in Coolify (*Environment Variables*; preview
+  deployments have their own list), since they are secrets.
 
 Open a PR. Coolify builds it and comments with the link. Pushing to the PR
 redeploys it, and closing the PR removes it.
-
-Each new project only needs this per-project list again. PR numbers repeat
-across repositories, so give each other project its own name in the template
-(`pr-{{pr_id}}-blog-preview.example.com`). The tunnel and DNS do not
-change.
 
 ## Security
 
@@ -251,7 +269,7 @@ redirects it to HTTPS.
 ## Layout
 
 ```
-site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_cleanup
+site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_cleanup, coolify_apps
 inventory/hosts.yml              which machine is the preview host
 group_vars/all/defaults.yml      every setting and its default
 group_vars/all/local.yml         your settings (not in git; template: local.example.yml)
@@ -259,4 +277,5 @@ roles/coolify/                   runs Coolify's installer once, binds its ports 
 roles/tailscale_dashboard/       dashboard on the tailnet with Tailscale Serve
 roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in Docker
 roles/preview_cleanup/           daily removal of unused Coolify images, Coolify cleanup mode
+roles/coolify_apps/              the applications in coolify_apps, through Coolify's API
 ```

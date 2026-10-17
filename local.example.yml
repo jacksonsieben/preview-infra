@@ -18,4 +18,13 @@ coolify_dashboard: tailscale
 cloudflare_api_token_ref: op://Ansible/Cloudflare API Token - tunnel/credential
 coolify_root_ref: op://Private/Coolify
 
+# Applications to deploy, through the GitHub App you registered in Coolify
+# (README, Step 4). Every option is in group_vars/all/defaults.yml.
+coolify_github_app: coolify-example
+coolify_apps:
+  - repo: you/site
+    project: Site
+    domains: ["{{ domain }}", "www.{{ domain }}"]
+    port: 8080
+
 # Running on another machine over SSH: put it in inventory/hosts.yml.

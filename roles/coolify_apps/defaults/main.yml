@@ -1,0 +1,21 @@
+---
+coolify_api: http://127.0.0.1:8000/api/v1
+
+# The server Coolify runs on, as Coolify names it.
+coolify_apps_server: localhost
+
+# Per-app defaults; each entry in coolify_apps can override any of them.
+coolify_app_defaults:
+  environment: production
+  branch: main
+  build_pack: dockerfile
+  port: 8080
+  domains: []
+  auto_deploy: true
+  previews: true
+  # Preview hostname: pr-<n>-<preview_name>.<domain>. Give each app its own
+  # name, since PR numbers repeat across repositories.
+  preview_name: preview
+
+# Coolify's placeholder, kept away from Ansible's own templating.
+coolify_pr_placeholder: !unsafe "{{pr_id}}"

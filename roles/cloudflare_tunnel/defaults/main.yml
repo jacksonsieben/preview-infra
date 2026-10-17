@@ -2,6 +2,12 @@
 cloudflare_api: https://api.cloudflare.com/client/v4
 cloudflare_tunnel_name: preview-host
 
+# Redirect http:// to https:// at Cloudflare. Coolify's domains are http://
+# behind the tunnel (README, "Why http://"), so this is what makes links HTTPS.
+# Needs the token permission Zone → Zone Settings → Edit; false leaves the
+# zone setting alone.
+cloudflare_always_use_https: true
+
 # Pin a tag (e.g. cloudflare/cloudflared:2026.9.1) for reproducible rebuilds.
 cloudflared_image: cloudflare/cloudflared:latest
 cloudflared_dir: /opt/cloudflared
@@ -32,13 +38,15 @@ cloudflare_tunnel_coolify_ingress:
       service: http://127.0.0.1:8000
 
 cloudflare_tunnel_ingress: >-
-  {{ cloudflare_tunnel_coolify_ingress[coolify_dashboard] + [
+  {{ cloudflare_tunnel_coolify_ingress[coolify_dashboard]
+     + production_hostnames | map('community.general.dict_kv', 'hostname')
+       | map('combine', {'service': 'http://127.0.0.1:80'}) | list
+     + [
        {'hostname': preview_wildcard, 'service': 'http://127.0.0.1:80'},
        {'service': 'http_status:404'},
      ] }}
 
 # DNS records pointed at the tunnel. More specific records (apex, www) still win
-# over the wildcard, so production can live elsewhere.
-cloudflare_tunnel_dns_names:
-  - "{{ coolify_hostname }}"
-  - "{{ preview_wildcard }}"
+# over the wildcard, so production can live elsewhere, unless it is listed in
+# production_hostnames.
+cloudflare_tunnel_dns_names: "{{ [coolify_hostname, preview_wildcard] + production_hostnames }}"
