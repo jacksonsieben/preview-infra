@@ -47,6 +47,58 @@
     - cloudflare_always_use_https
     - cloudflare_https.json.result.value != 'on'
 
+# Single Redirects, answered by Cloudflare before the tunnel: one 301 straight to
+# https://<target>, path and query kept. This playbook owns the zone's redirect
+# phase: rules added in the dashboard are replaced.
+- name: Read the zone's redirect rules
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/zones/{{ cloudflare_zone_id }}/rulesets/phases/http_request_dynamic_redirect/entrypoint"
+    headers: *cloudflare_headers
+    status_code: [200, 403, 404]
+  register: cloudflare_redirect_phase
+  when: cloudflare_redirects | length > 0
+
+- name: Check the token can change redirect rules
+  ansible.builtin.assert:
+    that: cloudflare_redirect_phase.status != 403
+    fail_msg: >-
+      The Cloudflare token can't read redirect rules. Add Zone → Single Redirect →
+      Edit to it (README, Step 2), or set cloudflare_redirects: [] and add the
+      redirect in the dashboard.
+    quiet: true
+  when: cloudflare_redirects | length > 0
+
+- name: Set the redirect rules
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/zones/{{ cloudflare_zone_id }}/rulesets/phases/http_request_dynamic_redirect/entrypoint"
+    method: PUT
+    headers: *cloudflare_headers
+    body_format: json
+    body:
+      rules: "{{ cloudflare_redirect_rules }}"
+  changed_when: true
+  when:
+    - cloudflare_redirects | length > 0
+    - >-
+      cloudflare_redirect_phase.status == 404
+      or (cloudflare_redirect_phase.json.result.rules | default([])
+          | map('community.general.keep_keys', target=['description', 'expression', 'action', 'action_parameters'])
+          | list) != cloudflare_redirect_rules
+  vars:
+    cloudflare_redirect_rules: >-
+      {%- set ns = namespace(rules=[]) -%}
+      {%- for r in cloudflare_redirects -%}
+        {%- set ns.rules = ns.rules + [{
+              'description': 'preview-infra: ' ~ r.from ~ ' -> ' ~ r.to,
+              'expression': '(http.host eq "' ~ r.from ~ '")',
+              'action': 'redirect',
+              'action_parameters': {'from_value': {
+                'status_code': 301,
+                'target_url': {'expression': 'concat("https://' ~ r.to ~ '", http.request.uri.path)'},
+                'preserve_query_string': true}}}] -%}
+      {%- endfor -%}
+      {{ ns.rules }}
+
 - name: Look up the tunnel
   ansible.builtin.uri:
     url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel?name={{ cloudflare_tunnel_name }}&is_deleted=false"

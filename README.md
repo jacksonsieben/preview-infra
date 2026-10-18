@@ -73,6 +73,7 @@ Create Token → Custom token:
 | Zone → DNS | Edit |
 | Zone → Zone | Read |
 | Zone → Zone Settings | Edit |
+| Zone → Single Redirect | Edit (only with `cloudflare_redirects`) |
 
 The tunnel permission has had several names. Any one of these is enough:
 *Cloudflare One Connector: cloudflared*, *Cloudflare One Connectors*, or the
