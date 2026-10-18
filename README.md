@@ -72,8 +72,6 @@ Create Token → Custom token:
 | Account → Cloudflare One Connector: cloudflared | Write/Edit |
 | Zone → DNS | Edit |
 | Zone → Zone | Read |
-| Zone → Zone Settings | Edit |
-| Zone → Single Redirect | Edit (only with `cloudflare_redirects`) |
 
 The tunnel permission has had several names. Any one of these is enough:
 *Cloudflare One Connector: cloudflared*, *Cloudflare One Connectors*, or the
@@ -107,10 +105,11 @@ Certificates*. The playbook stops with a message if either is missing. Set
 `coolify_dashboard: public` to skip Tailscale and serve the dashboard at
 `coolify.<domain>` instead.
 
-**Always Use HTTPS.** The playbook turns it on for the zone (that's the *Zone
-Settings* permission above). Coolify serves plain HTTP behind the tunnel (see
-[Why `http://`](#why-http-in-coolify)), and this makes every link HTTPS. Set
-`cloudflare_always_use_https: false` to manage it in the dashboard instead.
+**Redirects, set by hand in the Cloudflare dashboard.** Coolify serves plain HTTP
+behind the tunnel (see [Why `http://`](#why-http-in-coolify)), so turn on
+*SSL/TLS → Edge Certificates → Always Use HTTPS*. For www → apex, add a
+*Rules → Redirect Rules* rule: hostname equals `www.<domain>`, dynamic target
+`concat("https://<domain>", http.request.uri.path)`, 301, preserve query string.
 
 ## Step 3 — Run the playbook
 

@@ -2,18 +2,6 @@
 cloudflare_api: https://api.cloudflare.com/client/v4
 cloudflare_tunnel_name: preview-host
 
-# Redirect http:// to https:// at Cloudflare. Coolify's domains are http://
-# behind the tunnel (README, "Why http://"), so this is what makes links HTTPS.
-# Needs the token permission Zone → Zone Settings → Edit; false leaves the
-# zone setting alone.
-cloudflare_always_use_https: true
-
-# Host redirects done by Cloudflare (301, path and query kept), e.g.
-#   - {from: "www.{{ domain }}", to: "{{ domain }}"}
-# Needs the token permission Zone → Single Redirect → Edit. Empty leaves the
-# zone's redirect rules alone; non-empty makes this playbook own all of them.
-cloudflare_redirects: []
-
 # Pin a tag (e.g. cloudflare/cloudflared:2026.9.1) for reproducible rebuilds.
 cloudflared_image: cloudflare/cloudflared:latest
 cloudflared_dir: /opt/cloudflared
