@@ -52,7 +52,7 @@
     body_format: json
     body:
       name: "{{ coolify_app.project }}"
-    status_code: 201
+    status_code: [200, 201]
   register: coolify_project_created
   changed_when: true
   when: coolify_projects | selectattr('name', 'equalto', coolify_app.project) | list | length == 0
@@ -81,7 +81,7 @@
     body_format: json
     body:
       name: "{{ coolify_app.environment }}"
-    status_code: 201
+    status_code: [200, 201]
   changed_when: true
   when: coolify_environment.status == 404
 
@@ -104,7 +104,7 @@
            'autogenerate_domain': false,
            'instant_deploy': true,
          }, ({'name': coolify_app.name} if coolify_app.name is defined else {})) }}
-    status_code: 201
+    status_code: [200, 201]
   changed_when: true
   when: coolify_app_matches | length == 0
 

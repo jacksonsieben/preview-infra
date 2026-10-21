@@ -18,6 +18,7 @@
     headers:
       Authorization: "Bearer {{ cloudflare_api_token }}"
     body_format: json
+    status_code: [200, 201]
     body:
       type: CNAME
       name: "{{ dns_name }}"
