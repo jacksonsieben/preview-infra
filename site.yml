@@ -14,9 +14,47 @@
           cloudflare_api_token_ref (README, Step 2).
         quiet: true
       no_log: true
+
+    # An app on a zone that is neither `domain` nor in preview_zones would get
+    # no route, and none of the Access login of preview_zones.
+    - name: Check the preview apps
+      ansible.builtin.assert:
+        that:
+          - item.name | default('') | length > 0
+          - item.repository | default('') is match('^[^/\\s]+/[^/\\s]+$')
+          - item.zone | default('') in [domain] + preview_zones | map(attribute='zone', default='') | list
+          - item.port | default('') | string is match('^[0-9]+$')
+          - item.healthcheck_path | default('') is match('^/')
+        fail_msg: >-
+          Each entry of preview_apps needs a name, a repository (owner/name), a
+          zone that is `domain` or one of preview_zones, a port and a
+          healthcheck_path starting with /.
+        quiet: true
+      loop: "{{ preview_apps }}"
+      loop_control:
+        label: "{{ item.name | default('?') }}"
   roles:
     - coolify
     - role: tailscale_dashboard
       when: coolify_dashboard == 'tailscale'
     - cloudflare_tunnel
     - preview_cleanup
+  post_tasks:
+    # Coolify keeps its applications in its own database; these are the values
+    # to enter in its dashboard (README, Step 4).
+    - name: Coolify settings for the preview apps
+      ansible.builtin.debug:
+        msg:
+          - "Resource: Private Repository (with GitHub App), {{ item.repository }}, branch main"
+          - "Build Pack: Dockerfile. Ports Exposes: {{ item.port }}"
+          - "Domains: http://{{ 'main' ~ suffix }}.{{ item.zone }}"
+          - "Health check: on, path {{ item.healthcheck_path }}, port {{ item.port }}"
+          - "Persistent storage: {{ ('volume mounted at ' ~ item.data_path) if item.data_path | default('') else 'none' }}"
+          - "Preview Deployments and Auto Deploy: on"
+          - "Preview URL Template: pr-{% raw %}{{pr_id}}{% endraw %}{{ suffix }}.{{ item.zone }}"
+          - "Environment variables: none, also none for previews"
+      vars:
+        suffix: "{{ ('-' ~ item.preview_name) if item.preview_name | default('') else '' }}"
+      loop: "{{ preview_apps }}"
+      loop_control:
+        label: "{{ item.name }}"

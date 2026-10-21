@@ -48,6 +48,29 @@ preview_access_emails: []
 preview_access_session_duration: 24h
 
 # ---------------------------------------------------------------------------
+# Applications
+#
+# The Coolify applications that get PR previews, with what their image needs.
+# Coolify keeps its applications in its own database and they are created in
+# its dashboard (README, Step 4); the playbook checks that each one's zone is
+# routed and protected, and prints the values to enter at the end.
+#
+#   preview_apps:
+#     - name: myapp
+#       repository: you/myapp
+#       zone: example.dev              # domain or one of preview_zones
+#       port: 8080                     # the port the image listens on
+#       healthcheck_path: /health      # GET, answers 200 when ready
+#       data_path: /data               # optional: a volume, emptied per preview
+#       preview_name: ""               # optional: pr-12-<preview_name>.<zone>,
+#                                      # main-<preview_name>.<zone> for `main`
+#
+# With several apps on one zone, give each a preview_name: PR numbers repeat
+# across repositories.
+# ---------------------------------------------------------------------------
+preview_apps: []
+
+# ---------------------------------------------------------------------------
 # Secrets
 #
 # Each one is read from an environment variable when it is set, otherwise from
