@@ -2,6 +2,13 @@
 - name: Preview host
   hosts: preview
   become: true
+  vars:
+    # preview_apps without their environment variables: a loop shows its whole
+    # item with -v, values included.
+    preview_apps_shown: >-
+      {{ preview_apps | map('dict2items')
+         | map('rejectattr', 'key', 'in', ['preview_env', 'production_env'])
+         | map('items2dict') | list }}
   pre_tasks:
     - name: Check the settings
       ansible.builtin.assert:
@@ -30,7 +37,7 @@
           zone that is `domain` or one of preview_zones, a port and a
           healthcheck_path starting with /.
         quiet: true
-      loop: "{{ preview_apps }}"
+      loop: "{{ preview_apps_shown }}"
       loop_control:
         label: "{{ item.name | default('?') }}"
 
@@ -52,7 +59,7 @@
     - cloudflare_tunnel
     - preview_cleanup
     - role: coolify_apps
-      when: coolify_apps | length > 0
+      when: coolify_apps | length > 0 or preview_apps | length > 0
   post_tasks:
     # Coolify keeps its applications in its own database; these are the values
     # to enter in its dashboard (README, More zones and apps).
@@ -66,9 +73,9 @@
           - "Persistent storage: {{ ('volume mounted at ' ~ item.data_path) if item.data_path | default('') else 'none' }}"
           - "Preview Deployments and Auto Deploy: on"
           - "Preview URL Template: pr-{% raw %}{{pr_id}}{% endraw %}{{ suffix }}.{{ item.zone }}"
-          - "Environment variables: none, also none for previews"
+          - "Environment variables: none by hand; the playbook sets preview_env and production_env"
       vars:
         suffix: "{{ ('-' ~ item.preview_name) if item.preview_name | default('') else '' }}"
-      loop: "{{ preview_apps }}"
+      loop: "{{ preview_apps_shown }}"
       loop_control:
         label: "{{ item.name }}"

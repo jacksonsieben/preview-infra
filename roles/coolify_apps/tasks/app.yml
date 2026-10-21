@@ -2,9 +2,13 @@
 # One entry of coolify_apps. An existing application is found by its repository
 # (and `name`, when given) and only the fields that differ are changed.
 
+# Without the environment variables: set_fact shows its facts with -v. Their
+# values are only read in env.yml, under no_log.
 - name: "Settle the settings of {{ coolify_app_item.repo }}"
   ansible.builtin.set_fact:
-    coolify_app: "{{ coolify_app_defaults | combine(coolify_app_item) }}"
+    coolify_app: >-
+      {{ coolify_app_defaults | combine(coolify_app_item | dict2items
+         | rejectattr('key', 'in', ['preview_env', 'production_env']) | items2dict) }}
 
 - name: "Work out the wanted state of {{ coolify_app.repo }}"
   ansible.builtin.set_fact:
@@ -87,6 +91,8 @@
 
 # --- a new application ------------------------------------------------------
 
+# Deployed at the end, once it has its environment variables.
+
 - name: "Create the application for {{ coolify_app.repo }}"
   ansible.builtin.uri:
     url: "{{ coolify_api }}/applications/private-github-app"
@@ -102,9 +108,10 @@
            'git_repository': coolify_app.repo,
            'domains': coolify_app_domains | join(','),
            'autogenerate_domain': false,
-           'instant_deploy': true,
+           'instant_deploy': false,
          }, ({'name': coolify_app.name} if coolify_app.name is defined else {})) }}
     status_code: 201
+  register: coolify_app_created
   changed_when: true
   when: coolify_app_matches | length == 0
 
@@ -159,3 +166,21 @@
   when:
     - coolify_app_current is not skipped
     - coolify_app_patch | from_json | length > 0
+
+# --- environment variables --------------------------------------------------
+
+- name: "Set the environment variables of {{ coolify_app.repo }}"
+  ansible.builtin.include_tasks: env.yml
+  vars:
+    coolify_env_app_uuid: >-
+      {{ coolify_app_created.json.uuid if coolify_app_created is not skipped else coolify_app_matches[0].uuid }}
+    coolify_env_label: "{{ coolify_app.repo }}"
+
+- name: "Deploy the new application for {{ coolify_app.repo }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/applications/{{ coolify_app_created.json.uuid }}/start"
+    method: POST
+    headers: *coolify_headers
+    status_code: 200
+  changed_when: true
+  when: coolify_app_created is not skipped
