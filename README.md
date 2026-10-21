@@ -288,7 +288,9 @@ must give the preview link (or the command to run locally, when there is no
 preview), numbered steps with the exact URL or command and the expected result,
 and the regressions to check. Any change to sshd, ufw, DNS or the Cloudflare
 tunnel is ticked in the risk checklist and explained. Infra PRs are never run
-for real: the check is `ansible-playbook site.yml --syntax-check`.
+for real: the checks are `ansible-playbook site.yml --syntax-check` and
+`ansible-playbook tests/tunnel_routes.yml`, which renders the tunnel routes and
+DNS names offline and fails if production's would change.
 
 ## Security
 
@@ -408,4 +410,5 @@ roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in D
                                  Cloudflare Access for the other zones (tasks/access.yml)
 roles/preview_cleanup/           daily removal of unused Coolify images, Coolify cleanup mode
 roles/coolify_apps/              the applications in coolify_apps, through Coolify's API
+tests/tunnel_routes.yml          offline check of the tunnel routes and DNS names
 ```
