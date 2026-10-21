@@ -188,8 +188,9 @@ run, with a token deleted at the end.
   project its own `preview_name` (`blog-preview` → `pr-36-blog-preview.…`).
   Keep it to one level (`pr-36-preview.…`, not `36.preview.…`): the free
   certificate doesn't cover deeper subdomains. The tunnel and DNS don't change.
-- **Environment variables** stay in Coolify (*Environment Variables*; preview
-  deployments have their own list), since they are secrets.
+- **Environment variables:** `preview_env` and `production_env`, see
+  [Environment variables](#environment-variables). Anything else stays in
+  Coolify (*Environment Variables*; preview deployments have their own list).
 
 Open a PR. Coolify builds it and comments with the link. Pushing to the PR
 redeploys it, and closing the PR removes it.
@@ -277,9 +278,52 @@ printed at the end of the run. Also:
    volume behind that nothing removes.
 6. **Environment Variables:** add nothing that grants access elsewhere (a
    GitHub token, a runner address), in either list. Previews start empty.
+   What the app needs goes in `preview_env` / `production_env` in `local.yml`
+   ([Environment variables](#environment-variables)); the next run sets it.
 
 Open a PR: the GitHub App comments on it with the preview link, and updates
 the comment on every push.
+
+## Environment variables
+
+Any entry of `coolify_apps` or `preview_apps` can set environment variables,
+which the playbook writes through Coolify's API on every run:
+
+```yaml
+preview_apps:
+  - name: luotsi
+    repository: jacksonsieben/luotsi
+    # ...
+    preview_env:                      # only in PR deployments (is_preview: true)
+      LUOTSI_PREVIEW: "1"
+      LUOTSI_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'Luotsi preview code', field='credential', vault='Ansible') }}"
+    production_env: {}                # only in production (is_preview: false)
+```
+
+- **Secrets from 1Password.** Create a
+  [service account](https://developer.1password.com/docs/service-accounts/)
+  with read access to the vault, and export its token before the run:
+  `export OP_SERVICE_ACCOUNT_TOKEN=ops_...`. The lookup uses the `op` CLI, and
+  with a service account it needs `vault`. Values live only in 1Password and
+  Coolify: never in the repo, and no task prints them, not even with `--diff`
+  or `-v`.
+- **Previews and production stay apart.** Coolify keeps one list for each, and
+  a deployment reads only its own. A `production_env` variable is not copied
+  to previews.
+- **Only the playbook's own.** Each variable it creates has the comment
+  *Managed by preview-infra …* (`coolify_env_comment`). Taken out of the list,
+  it is deleted on the next run. A variable made by hand in Coolify is never
+  changed or deleted; a listed key that one already uses stops the run, so
+  delete it in Coolify or pick another name.
+- **As written, at runtime.** Values are literal (no `$VAR` expansion) and
+  are not build arguments, which could end up in the image. Coolify applies a
+  change on the app's next deployment: push to the PR, or redeploy `main`.
+- A `preview_apps` entry that sets variables must already exist in Coolify. It
+  is found by its repository, and by `name` when there are several.
+
+To compare the values, the run mints a second short-lived token that can read
+Coolify's secrets, only when some app sets variables. Only the tasks that set
+them use it, all hidden from the output, and it is deleted with the other one.
 
 ## Pull requests
 
@@ -290,7 +334,9 @@ and the regressions to check. Any change to sshd, ufw, DNS or the Cloudflare
 tunnel is ticked in the risk checklist and explained. Infra PRs are never run
 for real: the checks are `ansible-playbook site.yml --syntax-check` and
 `ansible-playbook tests/tunnel_routes.yml`, which renders the tunnel routes and
-DNS names offline and fails if production's would change.
+DNS names offline and fails if production's would change, and
+`python3 tests/coolify_env.py`, which runs the `coolify_apps` role against a
+fake Coolify API and checks the environment variables.
 
 ## Security
 
@@ -409,6 +455,8 @@ roles/tailscale_dashboard/       dashboard on the tailnet with Tailscale Serve
 roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in Docker,
                                  Cloudflare Access for the other zones (tasks/access.yml)
 roles/preview_cleanup/           daily removal of unused Coolify images, Coolify cleanup mode
-roles/coolify_apps/              the applications in coolify_apps, through Coolify's API
+roles/coolify_apps/              the applications in coolify_apps, through Coolify's API,
+                                 and the environment variables of every app (tasks/env.yml)
 tests/tunnel_routes.yml          offline check of the tunnel routes and DNS names
+tests/coolify_env.py             the coolify_apps role against a fake Coolify API
 ```
