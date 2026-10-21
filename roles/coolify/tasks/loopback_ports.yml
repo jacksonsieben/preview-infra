@@ -43,3 +43,30 @@
   failed_when: >-
     coolify_proxy_ports.rc != 0
     or coolify_proxy_ports.stdout_lines | select('in', ['ok', 'changed']) | list | length == 0
+
+# Coolify's Start Proxy button refuses while anything listens on 443, and
+# Tailscale Serve holds 443 on the tailnet address for the dashboard. Traefik
+# binds 127.0.0.1 (above), so the two don't collide: start it past the check.
+# Once running, Docker restarts it on boot.
+- name: Check whether the Coolify proxy is running
+  ansible.builtin.command: docker ps --quiet --filter name=^coolify-proxy$ --filter status=running
+  register: coolify_proxy_running
+  changed_when: false
+
+- name: Start the Coolify proxy
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        App\Actions\Proxy\StartProxy::run(App\Models\Server::find(0), async: false, force: true);
+        echo 'started';
+  register: coolify_proxy_start
+  changed_when: true
+  failed_when: coolify_proxy_start.rc != 0 or 'started' not in coolify_proxy_start.stdout
+  when: coolify_proxy_running.stdout | length == 0

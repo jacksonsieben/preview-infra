@@ -32,7 +32,10 @@ cloudflare_tunnel_coolify_ingress:
       service: http://127.0.0.1:8000
 
 cloudflare_tunnel_ingress: >-
-  {{ cloudflare_tunnel_coolify_ingress[coolify_dashboard] + [
+  {{ cloudflare_tunnel_coolify_ingress[coolify_dashboard]
+     + production_hostnames | map('community.general.dict_kv', 'hostname')
+       | map('combine', {'service': 'http://127.0.0.1:80'}) | list
+     + [
        {'hostname': preview_wildcard, 'service': 'http://127.0.0.1:80'},
      ] + cloudflare_extra_zones | map(attribute='wildcard') | map('community.general.dict_kv', 'hostname')
          | map('combine', {'service': 'http://127.0.0.1:80'}) | list + [
@@ -40,11 +43,10 @@ cloudflare_tunnel_ingress: >-
      ] }}
 
 # DNS records pointed at the tunnel, in `domain`. More specific records (apex,
-# www) still win over the wildcard, so production can live elsewhere. Each zone
-# in preview_zones gets its wildcard pointed there too.
-cloudflare_tunnel_dns_names:
-  - "{{ coolify_hostname }}"
-  - "{{ preview_wildcard }}"
+# www) still win over the wildcard, so production can live elsewhere, unless it
+# is listed in production_hostnames. Each zone in preview_zones gets its
+# wildcard pointed there too.
+cloudflare_tunnel_dns_names: "{{ [coolify_hostname, preview_wildcard] + production_hostnames }}"
 
 # preview_zones with their defaults filled in.
 cloudflare_extra_zones: >-

@@ -33,15 +33,18 @@
       loop: "{{ preview_apps }}"
       loop_control:
         label: "{{ item.name | default('?') }}"
+
   roles:
     - coolify
     - role: tailscale_dashboard
       when: coolify_dashboard == 'tailscale'
     - cloudflare_tunnel
     - preview_cleanup
+    - role: coolify_apps
+      when: coolify_apps | length > 0
   post_tasks:
     # Coolify keeps its applications in its own database; these are the values
-    # to enter in its dashboard (README, Step 4).
+    # to enter in its dashboard (README, More zones and apps).
     - name: Coolify settings for the preview apps
       ansible.builtin.debug:
         msg:
