@@ -253,6 +253,15 @@ with these differences:
 Open a PR: the GitHub App comments on it with the preview link, and updates
 the comment on every push.
 
+## Pull requests
+
+Every PR fills in `.github/pull_request_template.md`. Its *How to test* section
+must give the preview link (or the command to run locally, when there is no
+preview), numbered steps with the exact URL or command and the expected result,
+and the regressions to check. Any change to sshd, ufw, DNS or the Cloudflare
+tunnel is ticked in the risk checklist and explained. Infra PRs are never run
+for real: the check is `ansible-playbook site.yml --syntax-check`.
+
 ## Security
 
 - **Pull requests from forks run code on your machine.** On a public
