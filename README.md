@@ -290,7 +290,9 @@ and the regressions to check. Any change to sshd, ufw, DNS or the Cloudflare
 tunnel is ticked in the risk checklist and explained. Infra PRs are never run
 for real: the checks are `ansible-playbook site.yml --syntax-check` and
 `ansible-playbook tests/tunnel_routes.yml`, which renders the tunnel routes and
-DNS names offline and fails if production's would change.
+DNS names offline and fails if production's would change, and
+`ansible-playbook tests/access_201.yml`, which runs the Access and DNS tasks
+twice against a fake Cloudflare API that answers 201 on POST.
 
 ## Security
 
@@ -411,4 +413,5 @@ roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in D
 roles/preview_cleanup/           daily removal of unused Coolify images, Coolify cleanup mode
 roles/coolify_apps/              the applications in coolify_apps, through Coolify's API
 tests/tunnel_routes.yml          offline check of the tunnel routes and DNS names
+tests/access_201.yml             Access and DNS against a fake API (tests/fake_cloudflare.py)
 ```
