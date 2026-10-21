@@ -51,9 +51,12 @@
           {{ access_policy_saved.json.result.id if access_policy_saved is not skipped
              else (access_policies.json.result | selectattr('name', '==', access_name) | first).id }}
 
+    # The name filter narrows the list, and the next task picks the app by its
+    # name all the same. per_page covers an API that ignores the filter, so a
+    # second run never misses the app on page two and creates it again.
     - name: Look up the Access application
       ansible.builtin.uri:
-        url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/access/apps?name={{ access_name | urlencode }}&exact=true"
+        url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/access/apps?name={{ access_name | urlencode }}&exact=true&per_page=1000"
         headers: "{{ access_headers }}"
       register: access_apps
 
