@@ -1,0 +1,17 @@
+---
+# The coolify_apps role against the fake Coolify API of tests/coolify_env.py,
+# which runs this with the apps of each case as extra vars. Not meant to be run
+# by itself.
+
+- name: Coolify applications and their environment variables
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Read the defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all/defaults.yml"
+
+    - name: Configure the applications through the fake API
+      ansible.builtin.include_role:
+        name: coolify_apps

@@ -2,11 +2,21 @@
 # Applications declared in coolify_apps, created or corrected through Coolify's
 # REST API. The GitHub App itself can't be: GitHub only creates apps from a
 # browser (README, Step 4), so this role finds it by name and stops if it's missing.
+# The environment variables of these and of preview_apps are set here too
+# (tasks/env.yml).
 #
 # The API is off by default and needs a token. Each run enables it if needed,
 # mints a short-lived token for the root user (read, write, deploy; no access
 # to sensitive values), and in the end deletes the token and puts the API back
-# the way it was.
+# the way it was. When an app sets environment variables, a second token may
+# also read their values, to compare them; only the no_log tasks of env.yml
+# use it.
+
+- name: Check whether any app sets environment variables
+  ansible.builtin.set_fact:
+    coolify_env_declared: >-
+      {{ (coolify_apps + preview_apps) | map(attribute='preview_env', default={}) | select | list | length > 0
+         or (coolify_apps + preview_apps) | map(attribute='production_env', default={}) | select | list | length > 0 }}
 
 - name: Open a Coolify API session
   ansible.builtin.command:
@@ -26,7 +36,8 @@
         $u->tokens()->where('name', 'preview-infra')->delete();
         session(['currentTeam' => App\Models\Team::find(0)]);
         $t = $u->createToken('preview-infra', ['read', 'write', 'deploy']);
-        echo json_encode(['token' => $t->plainTextToken, 'api_was_enabled' => $was]);
+        $e = {{ "$u->createToken('preview-infra', ['read', 'read:sensitive', 'write'])->plainTextToken" if coolify_env_declared | bool else 'null' }};
+        echo json_encode(['token' => $t->plainTextToken, 'env_token' => $e, 'api_was_enabled' => $was]);
   register: coolify_api_session_raw
   changed_when: false
   no_log: true
@@ -38,67 +49,71 @@
 
 - name: Configure the applications
   block:
-    - name: Look up the Coolify server
-      ansible.builtin.uri:
-        url: "{{ coolify_api }}/servers"
-        headers: &coolify_headers
-          Authorization: "Bearer {{ coolify_api_session.token }}"
-          Accept: application/json
-      register: coolify_servers
+    # Only coolify_apps are created here; preview_apps exist already.
+    - name: Check the server and the GitHub App
+      when: coolify_apps | length > 0
+      block:
+        - name: Look up the Coolify server
+          ansible.builtin.uri:
+            url: "{{ coolify_api }}/servers"
+            headers: &coolify_headers
+              Authorization: "Bearer {{ coolify_api_session.token }}"
+              Accept: application/json
+          register: coolify_servers
 
-    - name: Check the server
-      ansible.builtin.assert:
-        that: coolify_servers.json | selectattr('name', 'equalto', coolify_apps_server) | list | length == 1
-        fail_msg: >-
-          Coolify has no server named '{{ coolify_apps_server }}'.
-          Found: {{ coolify_servers.json | map(attribute='name') | list }}
-        quiet: true
+        - name: Check the server
+          ansible.builtin.assert:
+            that: coolify_servers.json | selectattr('name', 'equalto', coolify_apps_server) | list | length == 1
+            fail_msg: >-
+              Coolify has no server named '{{ coolify_apps_server }}'.
+              Found: {{ coolify_servers.json | map(attribute='name') | list }}
+            quiet: true
 
-    - name: Remember the server
-      ansible.builtin.set_fact:
-        coolify_server: "{{ coolify_servers.json | selectattr('name', 'equalto', coolify_apps_server) | first }}"
+        - name: Remember the server
+          ansible.builtin.set_fact:
+            coolify_server: "{{ coolify_servers.json | selectattr('name', 'equalto', coolify_apps_server) | first }}"
 
-    # Deploys go over SSH to the host; validating checks that once (README, Step 4).
-    - name: Validate the server
-      ansible.builtin.uri:
-        url: "{{ coolify_api }}/servers/{{ coolify_server.uuid }}/validate"
-        method: POST
-        headers: *coolify_headers
-        status_code: [200, 201]
-      changed_when: true
-      when: not (coolify_server.settings.is_reachable | default(false) | bool)
+        # Deploys go over SSH to the host; validating checks that once (README, Step 4).
+        - name: Validate the server
+          ansible.builtin.uri:
+            url: "{{ coolify_api }}/servers/{{ coolify_server.uuid }}/validate"
+            method: POST
+            headers: *coolify_headers
+            status_code: [200, 201]
+          changed_when: true
+          when: not (coolify_server.settings.is_reachable | default(false) | bool)
 
-    - name: Wait for the server to be reachable
-      ansible.builtin.uri:
-        url: "{{ coolify_api }}/servers/{{ coolify_server.uuid }}"
-        headers: *coolify_headers
-      register: coolify_server_check
-      until: coolify_server_check.json.settings.is_reachable | default(false) | bool
-      retries: 12
-      delay: 5
-      when: not (coolify_server.settings.is_reachable | default(false) | bool)
+        - name: Wait for the server to be reachable
+          ansible.builtin.uri:
+            url: "{{ coolify_api }}/servers/{{ coolify_server.uuid }}"
+            headers: *coolify_headers
+          register: coolify_server_check
+          until: coolify_server_check.json.settings.is_reachable | default(false) | bool
+          retries: 12
+          delay: 5
+          when: not (coolify_server.settings.is_reachable | default(false) | bool)
 
-    - name: Look up the GitHub App
-      ansible.builtin.uri:
-        url: "{{ coolify_api }}/github-apps"
-        headers: *coolify_headers
-      register: coolify_github_apps
+        - name: Look up the GitHub App
+          ansible.builtin.uri:
+            url: "{{ coolify_api }}/github-apps"
+            headers: *coolify_headers
+          register: coolify_github_apps
 
-    - name: Remember the GitHub App
-      ansible.builtin.set_fact:
-        coolify_github_app_found: >-
-          {{ coolify_github_apps.json | selectattr('name', 'equalto', coolify_github_app) | list }}
+        - name: Remember the GitHub App
+          ansible.builtin.set_fact:
+            coolify_github_app_found: >-
+              {{ coolify_github_apps.json | selectattr('name', 'equalto', coolify_github_app) | list }}
 
-    - name: Check the GitHub App
-      ansible.builtin.assert:
-        that:
-          - coolify_github_app_found | length == 1
-          - coolify_github_app_found[0].installation_id | default(none) is not none
-        fail_msg: >-
-          Coolify has no installed GitHub App named '{{ coolify_github_app }}'.
-          GitHub only creates apps from a browser: follow README, Step 4, then
-          rerun. Found: {{ coolify_github_apps.json | map(attribute='name') | list }}
-        quiet: true
+        - name: Check the GitHub App
+          ansible.builtin.assert:
+            that:
+              - coolify_github_app_found | length == 1
+              - coolify_github_app_found[0].installation_id | default(none) is not none
+            fail_msg: >-
+              Coolify has no installed GitHub App named '{{ coolify_github_app }}'.
+              GitHub only creates apps from a browser: follow README, Step 4, then
+              rerun. Found: {{ coolify_github_apps.json | map(attribute='name') | list }}
+            quiet: true
 
     - name: Look up projects and applications
       ansible.builtin.uri:
@@ -118,6 +133,13 @@
       loop_control:
         loop_var: coolify_app_item
         label: "{{ coolify_app_item.repo }}"
+
+    - name: Set the environment variables of each preview app
+      ansible.builtin.include_tasks: preview_app.yml
+      loop: "{{ preview_apps }}"
+      loop_control:
+        loop_var: coolify_app_item
+        label: "{{ coolify_app_item.repository }}"
 
   always:
     - name: Close the Coolify API session

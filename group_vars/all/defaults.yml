@@ -39,6 +39,8 @@ production_hostnames: []
 #       domains: ["{{ domain }}", "www.{{ domain }}"]   # served as http:// (see README)
 #       port: 8080
 #       preview_name: preview   # previews at pr-<n>-preview.<domain>
+#       preview_env: {}         # optional, see "Environment variables" below
+#       production_env: {}
 # ---------------------------------------------------------------------------
 coolify_github_app: ""
 coolify_apps: []
@@ -95,11 +97,34 @@ preview_access_session_duration: 24h
 #       data_path: /data               # optional: a volume, emptied per preview
 #       preview_name: ""               # optional: pr-12-<preview_name>.<zone>,
 #                                      # main-<preview_name>.<zone> for `main`
+#       preview_env: {}                # optional, see "Environment variables" below
+#       production_env: {}
 #
 # With several apps on one zone, give each a preview_name: PR numbers repeat
 # across repositories.
 # ---------------------------------------------------------------------------
 preview_apps: []
+
+# ---------------------------------------------------------------------------
+# Environment variables
+#
+# Any entry of coolify_apps or preview_apps can set environment variables
+# through Coolify's API: preview_env only in PR deployments, production_env
+# only in the main one. Values are strings, usually a 1Password lookup; the
+# playbook never prints them.
+#
+#   preview_env:
+#     MYAPP_PREVIEW: "1"
+#     MYAPP_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'MyApp preview',
+#                              field='credential', vault='Ansible') }}"
+#   production_env: {}
+#
+# Variables the playbook creates carry the comment in coolify_env_comment and
+# are deleted once taken out of both lists; the ones made by hand in Coolify
+# are never touched. Values are literal and runtime-only, and reach the app on
+# its next deployment. A preview_apps entry must exist in Coolify before it
+# sets any.
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Secrets

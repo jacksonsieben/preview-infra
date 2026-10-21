@@ -26,6 +26,13 @@ coolify_apps:
     project: Site
     domains: ["{{ domain }}", "www.{{ domain }}"]
     port: 8080
+    # Only in PR previews, never in production (README, Environment variables).
+    # The lookup reads 1Password with the service account in
+    # OP_SERVICE_ACCOUNT_TOKEN; the value never goes in this file.
+    # preview_env:
+    #   SITE_PREVIEW: "1"
+    #   SITE_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'Site preview code', field='credential', vault='Ansible') }}"
+    # production_env: {}   # only in production, same format
 
 # The apex is not covered by the wildcard: list it to route it here too. Its
 # DNS record is replaced with one pointing at the tunnel.
@@ -47,5 +54,8 @@ coolify_apps:
 #     port: 8080
 #     healthcheck_path: /health
 #     data_path: /data
+#     preview_env:
+#       MYAPP_PREVIEW: "1"
+#       MYAPP_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'MyApp preview code', field='credential', vault='Ansible') }}"
 
 # Running on another machine over SSH: put it in inventory/hosts.yml.

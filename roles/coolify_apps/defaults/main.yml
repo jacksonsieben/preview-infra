@@ -19,3 +19,8 @@ coolify_app_defaults:
 
 # Coolify's placeholder, kept away from Ansible's own templating.
 coolify_pr_placeholder: !unsafe "{{pr_id}}"
+
+# The comment on every environment variable this role creates (tasks/env.yml).
+# Only variables with exactly this comment are updated or deleted; the rest were
+# made by hand and are left alone.
+coolify_env_comment: "Managed by preview-infra (preview_env/production_env in local.yml); deleted when taken out."
