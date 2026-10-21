@@ -217,16 +217,18 @@ fails at the end if `https://preview-infra-check.example.dev` does not answer
 with the Access login.
 
 **Per app:** describe it in `local.yml`. The playbook checks that its zone is
-routed and protected and, at the end, prints the values for Coolify:
+routed and protected and, at the end, prints the values for Coolify. For
+Luotsi, the values come from its `Dockerfile` (port 8740, health check on
+`GET /api/v1/status`, data and secrets key in the `/data` volume):
 
 ```yaml
 preview_apps:
-  - name: myapp
-    repository: you/myapp
-    zone: example.dev
-    port: 8080                 # the port the image listens on
-    healthcheck_path: /health  # GET, 200 when ready
-    data_path: /data           # where the image keeps its data, if anywhere
+  - name: luotsi
+    repository: jacksonsieben/luotsi
+    zone: example.dev                 # your zone
+    port: 8740                        # the port the image listens on (EXPOSE)
+    healthcheck_path: /api/v1/status  # GET, 200 when ready
+    data_path: /data                  # where the image keeps its data, if anywhere
 ```
 
 Then create it in Coolify as in [Step 4](#step-4--connect-github-and-a-project),
@@ -246,7 +248,9 @@ with these differences:
    destination path `data_path`. Leave the preview suffix on: each preview
    gets its own `<volume>-pr-<n>`, empty at the start, and Coolify deletes it
    with the preview. Never a bind mount (*Directory Mount*): previews would
-   share it with `main`.
+   share it with `main`. An image that declares `VOLUME` (Luotsi does, for
+   `/data`) needs this mount: without it, every deploy leaves an anonymous
+   volume behind that nothing removes.
 6. **Environment Variables:** add nothing that grants access elsewhere (a
    GitHub token, a runner address), in either list. Previews start empty.
 
@@ -278,6 +282,16 @@ for real: the check is `ansible-playbook site.yml --syntax-check`.
   not route a zone in `preview_zones` without an e-mail to allow, and checks
   after every run that the zone asks for the login. Previews on `domain`
   stay public, as before.
+- **Access is only enforced at Cloudflare, not on this host.** Traefik
+  listens on 127.0.0.1:80 and routes by `Host` header alone, so any process
+  on the preview host, agent workers included, skips the login with
+  `curl -H 'Host: main.example.dev' http://127.0.0.1/`. A local process could
+  do an app's first run (and become its owner) before you do. Nothing on the
+  LAN can: Traefik is bound to loopback. Until Traefik checks the Access token
+  itself ([#6](https://github.com/jacksonsieben/preview-infra/issues/6):
+  validate `Cf-Access-Jwt-Assertion` against the Access certs), do the first
+  run of a new deployment yourself right away, and run on this host only
+  processes you would trust with the previews.
 - **Coolify's ports are bound to 127.0.0.1.** Docker's published ports bypass
   ufw, so by default the dashboard (8000, 6001, 6002) and Traefik (80, 443)
   answer to the whole LAN, Traefik even for the dashboard's hostname. The
