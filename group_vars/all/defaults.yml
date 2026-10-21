@@ -15,6 +15,34 @@ domain: example.com
 coolify_hostname: "coolify.{{ domain }}"
 preview_wildcard: "*.{{ domain }}"
 
+# Hostnames that are not covered by the wildcard but should reach Coolify, for an
+# application deployed here as production. The wildcard already covers every
+# first-level name (www included); the apex is the usual one to add:
+#
+#   production_hostnames: ["{{ domain }}"]
+#
+# Each gets a tunnel route to Traefik and a proxied CNAME, which replaces any
+# record the name had. Then give the application that domain in Coolify.
+production_hostnames: []
+
+# ---------------------------------------------------------------------------
+# Applications, through Coolify's API
+#
+# Declared here, created or corrected through Coolify's API on every run. The
+# GitHub App they deploy from is the one manual step (README, Step 4): name it
+# in coolify_github_app. Each entry needs `repo` and `project`; the rest has
+# defaults in roles/coolify_apps/defaults/main.yml.
+#
+#   coolify_apps:
+#     - repo: you/site
+#       project: Site
+#       domains: ["{{ domain }}", "www.{{ domain }}"]   # served as http:// (see README)
+#       port: 8080
+#       preview_name: preview   # previews at pr-<n>-preview.<domain>
+# ---------------------------------------------------------------------------
+coolify_github_app: ""
+coolify_apps: []
+
 # Where the Coolify dashboard is reachable:
 #   tailscale  only from your tailnet, at https://<machine>.<tailnet>.ts.net.
 #              The tunnel serves just coolify.<domain>/webhooks/ for GitHub.
@@ -48,12 +76,15 @@ preview_access_emails: []
 preview_access_session_duration: 24h
 
 # ---------------------------------------------------------------------------
-# Applications
+# Applications, by hand
 #
 # The Coolify applications that get PR previews, with what their image needs.
-# Coolify keeps its applications in its own database and they are created in
-# its dashboard (README, Step 4); the playbook checks that each one's zone is
-# routed and protected, and prints the values to enter at the end.
+# Coolify keeps its applications in its own database and these are created in
+# its dashboard (README, More zones and apps); the playbook checks that each
+# one's zone is routed and protected, and prints the values to enter at the
+# end. Use this for an app on one of preview_zones, or one that needs a health
+# check or storage: coolify_apps above can't set those yet. A repository is in
+# one of the two lists, not both.
 #
 #   preview_apps:
 #     - name: myapp

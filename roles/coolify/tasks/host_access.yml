@@ -42,7 +42,8 @@
 
 # A Match block runs to the end of the file, so it must come after every global
 # setting: append it to the main sshd_config, never to a drop-in included at
-# the top. It overrides PermitRootLogin only for the Coolify network.
+# the top. It overrides PermitRootLogin, and an AllowUsers list that leaves
+# root out (e.g. AllowUsers <you> in a drop-in), only for the Coolify network.
 - name: Find sshd
   ansible.builtin.shell:
     cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
@@ -57,6 +58,7 @@
     block: |
       Match Address {{ coolify_subnet.stdout }}
           PermitRootLogin prohibit-password
+          AllowUsers root
     # sshd is in /usr/sbin on Debian and Ubuntu, /usr/bin on Arch.
     validate: "{{ coolify_sshd_path.stdout }} -t -f %s"
   notify: Reload sshd

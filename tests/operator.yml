@@ -1,0 +1,25 @@
+---
+# Shaped like production's local.yml, with example names and no secrets: the
+# apex served from here, one app through Coolify's API, and a second zone with
+# a hand-made preview app.
+domain: example.com
+coolify_dashboard: tailscale
+production_hostnames: ["{{ domain }}"]
+
+coolify_github_app: coolify-example
+coolify_apps:
+  - repo: you/site
+    project: Site
+    domains: ["{{ domain }}", "www.{{ domain }}"]
+    port: 8080
+
+preview_access_emails: [you@example.com]
+preview_zones:
+  - zone: example.dev
+preview_apps:
+  - name: myapp
+    repository: you/myapp
+    zone: example.dev
+    port: 8740
+    healthcheck_path: /health
+    data_path: /data
