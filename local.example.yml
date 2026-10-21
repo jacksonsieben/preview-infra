@@ -18,4 +18,20 @@ coolify_dashboard: tailscale
 cloudflare_api_token_ref: op://Ansible/Cloudflare API Token - tunnel/credential
 coolify_root_ref: op://Private/Coolify
 
+# A second zone for another project's previews (README, More zones and apps).
+# Everything on it asks for a Cloudflare Access login first; only these
+# e-mails get in.
+# preview_access_emails: [you@example.com]
+# preview_zones:
+#   - zone: example.dev
+
+# The apps that get previews; the playbook prints what to enter in Coolify.
+# preview_apps:
+#   - name: myapp
+#     repository: you/myapp
+#     zone: example.dev
+#     port: 8080
+#     healthcheck_path: /health
+#     data_path: /data
+
 # Running on another machine over SSH: put it in inventory/hosts.yml.
