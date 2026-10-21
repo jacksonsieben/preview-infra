@@ -66,6 +66,7 @@
     method: POST
     headers: *cloudflare_headers
     body_format: json
+    status_code: [200, 201]
     body:
       name: "{{ cloudflare_tunnel_name }}"
       config_src: cloudflare
@@ -173,18 +174,42 @@
   changed_when: "'Started' in cloudflared_up.stderr or 'Recreated' in cloudflared_up.stderr"
 
 # Nothing on these zones may answer without the Access login. A new DNS record
-# can take a little while to resolve, hence the retries.
-- name: Check that the other preview zones ask for a login
-  ansible.builtin.uri:
-    url: "https://{{ item.wildcard | replace('*', cloudflare_access_probe) }}/"
-    follow_redirects: none
-  loop: "{{ cloudflare_extra_zones }}"
-  loop_control:
-    label: "https://{{ item.wildcard | replace('*', cloudflare_access_probe) }}/"
-  register: cloudflare_access_probe_result
-  failed_when: >-
-    cloudflare_access_probe_result.status | default(0) != 302
-    or '/cdn-cgi/access/' not in cloudflare_access_probe_result.location | default('')
-  until: cloudflare_access_probe_result is not failed
-  retries: 12
-  delay: 10
+# can take a little while to resolve, hence the retries. The probe uses the
+# host's resolver on purpose: that is what a visitor's machine does, and
+# pinning 1.1.1.1 would need dig on the host and an IP override on the request.
+# A local resolver can still hold an NXDOMAIN from before the record existed,
+# so the failure says how to tell that apart from a real problem.
+- name: Login check on the other preview zones
+  block:
+    - name: Check that the other preview zones ask for a login
+      ansible.builtin.uri:
+        url: "https://{{ item.wildcard | replace('*', cloudflare_access_probe) }}/"
+        follow_redirects: none
+      loop: "{{ cloudflare_extra_zones }}"
+      loop_control:
+        label: "https://{{ item.wildcard | replace('*', cloudflare_access_probe) }}/"
+      register: cloudflare_access_probe_result
+      failed_when: >-
+        cloudflare_access_probe_result.status | default(0) != 302
+        or '/cdn-cgi/access/' not in cloudflare_access_probe_result.location | default('')
+      until: cloudflare_access_probe_result is not failed
+      retries: 12
+      delay: 10
+  rescue:
+    - name: Explain a failed login check
+      ansible.builtin.fail:
+        msg: >-
+          {{ cloudflare_access_probe_url }} did not answer with a 302 to the
+          Access login. If the name did not resolve, the local resolver may
+          still cache an NXDOMAIN from before the DNS record existed. Check
+          with public DNS: `dig +short @1.1.1.1 {{ cloudflare_access_probe_host }}`
+          and `curl -sI --resolve {{ cloudflare_access_probe_host }}:443:<an IP from dig>
+          {{ cloudflare_access_probe_url }}`. A 302 to /cdn-cgi/access/ there
+          means only the cache is stale (`resolvectl flush-caches` clears it
+          on systemd-resolved); run the playbook again.
+      vars:
+        cloudflare_access_probe_host: "{{ item.wildcard | replace('*', cloudflare_access_probe) }}"
+        cloudflare_access_probe_url: "https://{{ cloudflare_access_probe_host }}/"
+      loop: "{{ cloudflare_access_probe_result.results | default([]) | select('failed') | map(attribute='item') | list }}"
+      loop_control:
+        label: "{{ item.zone }}"

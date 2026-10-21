@@ -4,6 +4,9 @@
 # on the zone's wildcard that uses it. Anything on the wildcard, including a
 # preview Coolify has just created, asks for a login (a one-time PIN sent to
 # one of those addresses) before Cloudflare lets the request reach the tunnel.
+#
+# Cloudflare answers a POST that creates the policy or the app with 201
+# Created, so the writes accept 200 and 201.
 
 - name: "Cloudflare Access for {{ access_zone.wildcard }}"
   vars:
@@ -26,6 +29,7 @@
         method: "{{ 'PUT' if access_policy else 'POST' }}"
         headers: "{{ access_headers }}"
         body_format: json
+        status_code: [200, 201]
         body:
           name: "{{ access_name }}"
           decision: allow
@@ -68,6 +72,7 @@
         method: "{{ 'PUT' if access_app else 'POST' }}"
         headers: "{{ access_headers }}"
         body_format: json
+        status_code: [200, 201]
         body:
           name: "{{ access_name }}"
           type: self_hosted

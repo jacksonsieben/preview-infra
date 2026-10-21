@@ -1,0 +1,80 @@
+---
+# Access and DNS against a fake Cloudflare API that answers 201 Created on
+# every POST, as the real one does for Access policies and apps. Offline: no
+# real API call, and group_vars/all/local.yml is not read.
+#
+#   ansible-playbook tests/access_201.yml
+#
+# The first run creates the policy, the app and the DNS record; the second
+# finds them and writes nothing (its Access and DNS tasks report ok).
+
+- name: Access and DNS accept 201 and are idempotent
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    fake_port: 18471
+    cloudflare_api: "http://127.0.0.1:{{ fake_port }}"
+    cloudflare_api_token: test-token
+    cloudflare_account_id: acct
+    cloudflare_tunnel_id: tunnel-id
+    preview_access_session_duration: 24h
+    access_zone:
+      zone: example.dev
+      wildcard: "*.example.dev"
+      access_emails: [b@example.com, a@example.com]
+    dns_zone_id: zone-id
+    dns_name: "*.example.dev"
+  tasks:
+    - name: Start the fake Cloudflare API
+      ansible.builtin.command:
+        cmd: "python3 {{ playbook_dir }}/fake_cloudflare.py {{ fake_port }}"
+      async: 300
+      poll: 0
+      changed_when: false
+      register: fake_api
+
+    - name: Wait for the fake API
+      ansible.builtin.wait_for:
+        port: "{{ fake_port }}"
+        host: 127.0.0.1
+        timeout: 10
+
+    - name: Runs against the fake API
+      block:
+        - name: First run, Access
+          ansible.builtin.include_tasks: ../roles/cloudflare_tunnel/tasks/access.yml
+
+        - name: First run, DNS
+          ansible.builtin.include_tasks: ../roles/cloudflare_tunnel/tasks/dns.yml
+
+        - name: Count the writes of the first run
+          ansible.builtin.uri:
+            url: "{{ cloudflare_api }}/_writes"
+          register: first_writes
+
+        - name: Second run, Access
+          ansible.builtin.include_tasks: ../roles/cloudflare_tunnel/tasks/access.yml
+
+        - name: Second run, DNS
+          ansible.builtin.include_tasks: ../roles/cloudflare_tunnel/tasks/dns.yml
+
+        - name: Count the writes of both runs
+          ansible.builtin.uri:
+            url: "{{ cloudflare_api }}/_writes"
+          register: both_writes
+
+        - name: Check that the first run created three things and the second none
+          ansible.builtin.assert:
+            that:
+              - first_writes.json.writes == 3
+              - both_writes.json.writes == 3
+            fail_msg: >-
+              Writes: {{ first_writes.json.writes }} on the first run,
+              {{ both_writes.json.writes - first_writes.json.writes }} on the second.
+      always:
+        - name: Stop the fake API
+          ansible.builtin.command:
+            cmd: "pkill -f 'fake_cloudflare.py {{ fake_port }}'"
+          changed_when: false
+          failed_when: false
