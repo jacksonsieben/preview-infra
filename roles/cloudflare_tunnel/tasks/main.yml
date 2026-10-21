@@ -3,6 +3,24 @@
 # API) and the host only runs `cloudflared` with the tunnel token. Nothing on the
 # host listens on the internet; no router port is opened.
 
+- name: Check the other preview zones
+  ansible.builtin.assert:
+    that:
+      - item.zone | length > 0
+      - item.zone != domain
+      - item.wildcard is match('^\\*\\.[^*]+$')
+      - item.wildcard is search('\\.' ~ (item.zone | regex_escape) ~ '$')
+      - item.access_emails is not string
+      - item.access_emails | default([], true) | length > 0
+    fail_msg: >-
+      Each entry of preview_zones needs a zone other than `domain`, a wildcard
+      *.<name> inside that zone, and at least one e-mail in access_emails or
+      preview_access_emails: previews there are never left open.
+    quiet: true
+  loop: "{{ cloudflare_extra_zones }}"
+  loop_control:
+    label: "{{ item.zone | default('?') }}"
+
 - name: Look up the Cloudflare zone
   ansible.builtin.uri:
     url: "{{ cloudflare_api }}/zones?name={{ domain }}"
@@ -15,6 +33,26 @@
   ansible.builtin.set_fact:
     cloudflare_zone_id: "{{ cloudflare_zone.json.result[0].id }}"
     cloudflare_account_id: "{{ cloudflare_zone.json.result[0].account.id }}"
+
+# The tunnel belongs to the account of `domain`; a CNAME to it from a zone on
+# another account does not route.
+- name: Look up the other preview zones
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/zones?name={{ item.zone }}"
+    headers: *cloudflare_headers
+  loop: "{{ cloudflare_extra_zones }}"
+  loop_control:
+    label: "{{ item.zone }}"
+  register: cloudflare_extra_zone_lookup
+  failed_when: >-
+    cloudflare_extra_zone_lookup.json.result | length != 1
+    or cloudflare_extra_zone_lookup.json.result[0].account.id != cloudflare_account_id
+
+- name: Remember the other zone ids
+  ansible.builtin.set_fact:
+    cloudflare_extra_zone_ids: >-
+      {{ dict(cloudflare_extra_zone_lookup.results | map(attribute='item.zone')
+              | zip(cloudflare_extra_zone_lookup.results | map(attribute='json.result.0.id'))) }}
 
 - name: Look up the tunnel
   ansible.builtin.uri:
@@ -77,6 +115,27 @@
   loop: "{{ cloudflare_tunnel_dns_names }}"
   loop_control:
     loop_var: dns_name
+  vars:
+    dns_zone_id: "{{ cloudflare_zone_id }}"
+
+# Access goes up before the DNS record, so a new zone is never reachable
+# without the login, not even for the length of one run.
+- name: Put Cloudflare Access in front of the other preview zones
+  ansible.builtin.include_tasks: access.yml
+  loop: "{{ cloudflare_extra_zones }}"
+  loop_control:
+    loop_var: access_zone
+    label: "{{ access_zone.zone }}"
+
+- name: Point the other preview zones at the tunnel
+  ansible.builtin.include_tasks: dns.yml
+  loop: "{{ cloudflare_extra_zones }}"
+  loop_control:
+    loop_var: dns_zone
+    label: "{{ dns_zone.wildcard }}"
+  vars:
+    dns_name: "{{ dns_zone.wildcard }}"
+    dns_zone_id: "{{ cloudflare_extra_zone_ids[dns_zone.zone] }}"
 
 - name: Read the tunnel token
   ansible.builtin.uri:
@@ -112,3 +171,20 @@
     chdir: "{{ cloudflared_dir }}"
   register: cloudflared_up
   changed_when: "'Started' in cloudflared_up.stderr or 'Recreated' in cloudflared_up.stderr"
+
+# Nothing on these zones may answer without the Access login. A new DNS record
+# can take a little while to resolve, hence the retries.
+- name: Check that the other preview zones ask for a login
+  ansible.builtin.uri:
+    url: "https://{{ item.wildcard | replace('*', cloudflare_access_probe) }}/"
+    follow_redirects: none
+  loop: "{{ cloudflare_extra_zones }}"
+  loop_control:
+    label: "https://{{ item.wildcard | replace('*', cloudflare_access_probe) }}/"
+  register: cloudflare_access_probe_result
+  failed_when: >-
+    cloudflare_access_probe_result.status | default(0) != 302
+    or '/cdn-cgi/access/' not in cloudflare_access_probe_result.location | default('')
+  until: cloudflare_access_probe_result is not failed
+  retries: 12
+  delay: 10

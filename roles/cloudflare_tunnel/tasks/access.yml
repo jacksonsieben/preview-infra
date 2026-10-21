@@ -1,0 +1,89 @@
+---
+# Cloudflare Access in front of one zone of preview_zones (`access_zone`): a
+# reusable policy that allows only its e-mails, and a self-hosted application
+# on the zone's wildcard that uses it. Anything on the wildcard, including a
+# preview Coolify has just created, asks for a login (a one-time PIN sent to
+# one of those addresses) before Cloudflare lets the request reach the tunnel.
+
+- name: "Cloudflare Access for {{ access_zone.wildcard }}"
+  vars:
+    access_name: "preview-infra: {{ access_zone.zone }} previews"
+    access_emails: "{{ access_zone.access_emails | sort }}"
+    access_headers:
+      Authorization: "Bearer {{ cloudflare_api_token }}"
+  block:
+    - name: Look up the Access policy
+      ansible.builtin.uri:
+        url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/access/policies?per_page=1000"
+        headers: "{{ access_headers }}"
+      register: access_policies
+
+    - name: Create or update the Access policy
+      ansible.builtin.uri:
+        url: >-
+          {{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/access/policies{{
+             '/' ~ access_policy.id if access_policy else '' }}
+        method: "{{ 'PUT' if access_policy else 'POST' }}"
+        headers: "{{ access_headers }}"
+        body_format: json
+        body:
+          name: "{{ access_name }}"
+          decision: allow
+          include: >-
+            {{ access_emails | map('community.general.dict_kv', 'email')
+               | map('community.general.dict_kv', 'email') | list }}
+      vars:
+        access_policy: >-
+          {{ access_policies.json.result | default([], true)
+             | selectattr('name', '==', access_name) | first | default({}) }}
+      register: access_policy_saved
+      changed_when: true
+      when: >-
+        not access_policy
+        or access_policy.decision != 'allow'
+        or access_policy.include | default([]) | map(attribute='email.email', default='') | sort != access_emails
+        or access_policy.require | default([], true) | length > 0
+        or access_policy.exclude | default([], true) | length > 0
+
+    - name: Remember the Access policy id
+      ansible.builtin.set_fact:
+        access_policy_id: >-
+          {{ access_policy_saved.json.result.id if access_policy_saved is not skipped
+             else (access_policies.json.result | selectattr('name', '==', access_name) | first).id }}
+
+    - name: Look up the Access application
+      ansible.builtin.uri:
+        url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/access/apps?name={{ access_name | urlencode }}&exact=true"
+        headers: "{{ access_headers }}"
+      register: access_apps
+
+    - name: Create or update the Access application
+      ansible.builtin.uri:
+        url: >-
+          {{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/access/apps{{
+             '/' ~ access_app.id if access_app else '' }}
+        method: "{{ 'PUT' if access_app else 'POST' }}"
+        headers: "{{ access_headers }}"
+        body_format: json
+        body:
+          name: "{{ access_name }}"
+          type: self_hosted
+          domain: "{{ access_zone.wildcard }}"
+          destinations:
+            - type: public
+              uri: "{{ access_zone.wildcard }}"
+          session_duration: "{{ preview_access_session_duration }}"
+          app_launcher_visible: false
+          policies:
+            - id: "{{ access_policy_id }}"
+              precedence: 1
+      vars:
+        access_app: >-
+          {{ access_apps.json.result | default([], true)
+             | selectattr('name', '==', access_name) | first | default({}) }}
+      changed_when: true
+      when: >-
+        not access_app
+        or access_app.domain | default('') != access_zone.wildcard
+        or access_app.session_duration | default('') != preview_access_session_duration
+        or access_app.policies | default([], true) | map(attribute='id') | list != [access_policy_id]

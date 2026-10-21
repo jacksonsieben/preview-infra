@@ -22,6 +22,32 @@ preview_wildcard: "*.{{ domain }}"
 coolify_dashboard: tailscale
 
 # ---------------------------------------------------------------------------
+# More zones
+#
+# Other zones whose previews also go through this host, each on the same
+# Cloudflare account as `domain`. Each gets its wildcard routed to Coolify and
+# a Cloudflare Access application in front of it: only the e-mails listed can
+# open anything on the wildcard. Leave empty for a single domain.
+#
+#   preview_zones:
+#     - zone: example.dev
+#       wildcard: "*.example.dev"        # optional, this is the default
+#       access_emails: [you@example.com] # optional, default preview_access_emails
+#
+# The wildcard stays one level deep (pr-12.example.dev), for the same
+# certificate reason as above. Coolify's own hostname stays on `domain`.
+# ---------------------------------------------------------------------------
+preview_zones: []
+
+# Who may open the previews on preview_zones (Cloudflare Access, one-time PIN
+# by e-mail). Required for every zone in preview_zones: there is no open
+# preview.
+preview_access_emails: []
+
+# How long a Cloudflare Access login lasts before it asks again.
+preview_access_session_duration: 24h
+
+# ---------------------------------------------------------------------------
 # Secrets
 #
 # Each one is read from an environment variable when it is set, otherwise from
