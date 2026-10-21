@@ -239,7 +239,8 @@ with the Access login.
 `coolify_apps` ([Step 4](#step-4--connect-github-and-a-project)), whose
 previews are always on `domain` and which set no health check or storage,
 these are created by hand in Coolify: the playbook checks that the app's zone
-is routed and protected and, at the end, prints the values to enter. For
+is routed and protected and, at the end, prints the values to enter. A
+repository goes in one list or the other, never both. For
 Luotsi, the values come from its `Dockerfile` (port 8740, health check on
 `GET /api/v1/status`, data and secrets key in the `/data` volume):
 

@@ -83,7 +83,8 @@ preview_access_session_duration: 24h
 # its dashboard (README, More zones and apps); the playbook checks that each
 # one's zone is routed and protected, and prints the values to enter at the
 # end. Use this for an app on one of preview_zones, or one that needs a health
-# check or storage: coolify_apps above can't set those yet.
+# check or storage: coolify_apps above can't set those yet. A repository is in
+# one of the two lists, not both.
 #
 #   preview_apps:
 #     - name: myapp

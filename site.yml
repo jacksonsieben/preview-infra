@@ -34,6 +34,17 @@
       loop_control:
         label: "{{ item.name | default('?') }}"
 
+    # coolify_apps are changed through Coolify's API on every run; an app set up
+    # by hand from preview_apps would be overwritten with their settings.
+    - name: Check that no app is in both coolify_apps and preview_apps
+      ansible.builtin.assert:
+        that: >-
+          coolify_apps | map(attribute='repo') | map('lower')
+          | intersect(preview_apps | map(attribute='repository') | map('lower')) | length == 0
+        fail_msg: >-
+          A repository is listed in both coolify_apps and preview_apps. Keep it
+          in one of them (README, Step 4 and More zones and apps).
+        quiet: true
   roles:
     - coolify
     - role: tailscale_dashboard

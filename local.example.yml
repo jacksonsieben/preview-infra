@@ -39,7 +39,7 @@ coolify_apps:
 #   - zone: example.dev
 
 # Apps created by hand in Coolify, for previews on other zones; the playbook
-# prints what to enter.
+# prints what to enter. A repository is in coolify_apps or here, not both.
 # preview_apps:
 #   - name: myapp
 #     repository: you/myapp
