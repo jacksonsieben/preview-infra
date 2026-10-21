@@ -14,6 +14,9 @@ preview is removed when the PR closes.
 - **This playbook** installs both and sets up the tunnel routes and DNS
   through the Cloudflare API, so you can rebuild the whole thing on another
   machine with one command.
+- **More zones** (optional) get previews too, each behind **Cloudflare
+  Access**: only the e-mails you list can open them. See
+  [More zones and apps](#more-zones-and-apps).
 
 ```
 PR opened / pushed ─► GitHub App webhook ─► coolify.example.com/webhooks/ ─┐
@@ -82,6 +85,13 @@ cover tunnels.
 The account permission applies to the whole account. Limit the zone
 permissions to `example.com`.
 
+With [more zones](#more-zones-and-apps), add every one of them to the zone
+permissions, and one more account permission:
+
+| Permission | Access |
+|---|---|
+| Account → Access: Apps and Policies | Edit |
+
 **Coolify admin account.** The playbook creates it when it installs Coolify,
 so nobody else can claim the registration page. The password needs upper and
 lower case letters, a digit, and only `-` `_` `.` as symbols (Coolify's
@@ -125,6 +135,9 @@ It is idempotent; rerun it any time. Afterwards:
 - Cloudflare → Zero Trust → Networks → Tunnels shows `preview-host` as
   *Healthy*.
 - DNS has proxied CNAMEs `coolify` and `*` pointing at the tunnel.
+- With more zones: each has a proxied `*` CNAME too, and Zero Trust → Access →
+  Applications lists `preview-infra: <zone> previews`. The last task of the
+  role opened `https://preview-infra-check.<zone>` and got the Access login.
 
 ## Step 4 — Connect GitHub and a project
 
@@ -162,6 +175,84 @@ across repositories, so give each other project its own name in the template
 (`pr-{{pr_id}}-blog-preview.example.com`). The tunnel and DNS do not
 change.
 
+## More zones and apps
+
+Previews can live in other zones too, for example one domain per project.
+Each extra zone gets the same tunnel route and wildcard DNS as `domain`, plus
+a **Cloudflare Access** application on its whole wildcard: every hostname
+there asks for a login first, and only the e-mails listed get in. That is
+not optional. An app with a first-run screen (whoever opens it first becomes
+its owner) must never be open to the internet, not even for a minute.
+
+The zone's previews are one level deep, `pr-12.example.dev`: the free
+certificate covers `*.example.dev` but not `*.preview.example.dev` (that
+needs Cloudflare's paid Advanced Certificate Manager). The apex
+`example.dev` is not matched by the wildcard and stays free for a project
+site. A `www` or other public name later needs its own DNS record and its
+own Access application with a *Bypass* policy, which wins over the wildcard
+because it is more specific.
+
+**Once per Cloudflare account**, before the first extra zone:
+
+1. Cloudflare dashboard → Zero Trust. If it asks, create the organization
+   (any team name) on the Free plan.
+2. Zero Trust → Settings → Authentication → Login methods: *One-time PIN*
+   must be listed (it is by default). Access mails a code to the address
+   that tries to log in, and only the listed addresses get one that works.
+3. Give the API token the extra permissions from
+   [Step 2](#step-2--your-settings-and-secrets).
+
+**Per zone:** add the domain to Cloudflare (same account as `domain`), turn on
+SSL/TLS → Edge Certificates → *Always Use HTTPS*, and list it in `local.yml`:
+
+```yaml
+preview_access_emails: [you@example.com]
+preview_zones:
+  - zone: example.dev
+```
+
+`access_emails` on a zone overrides `preview_access_emails` for it. Rerun
+the playbook. It creates the Access application before the DNS record, and
+fails at the end if `https://preview-infra-check.example.dev` does not answer
+with the Access login.
+
+**Per app:** describe it in `local.yml`. The playbook checks that its zone is
+routed and protected and, at the end, prints the values for Coolify:
+
+```yaml
+preview_apps:
+  - name: myapp
+    repository: you/myapp
+    zone: example.dev
+    port: 8080                 # the port the image listens on
+    healthcheck_path: /health  # GET, 200 when ready
+    data_path: /data           # where the image keeps its data, if anywhere
+```
+
+Then create it in Coolify as in [Step 4](#step-4--connect-github-and-a-project),
+with these differences:
+
+1. On GitHub → Settings → Applications → your Coolify GitHub App →
+   *Configure*, add the repository to *Repository access*.
+2. **Domains:** `http://main.example.dev` (the `main` branch). It is behind
+   Access too.
+3. **Health check:** on, with the path and port printed. Coolify runs it
+   inside the container with `curl` or `wget`; an image without either needs
+   its own `HEALTHCHECK` instead, with Coolify's turned off.
+4. **Preview URL Template:** `pr-{{pr_id}}.example.dev`. With several apps
+   on one zone, set `preview_name` on each and use the printed template
+   (`pr-{{pr_id}}-<preview_name>.example.dev`).
+5. **Persistent Storage** (only with `data_path`): + Add → *Volume Mount*,
+   destination path `data_path`. Leave the preview suffix on: each preview
+   gets its own `<volume>-pr-<n>`, empty at the start, and Coolify deletes it
+   with the preview. Never a bind mount (*Directory Mount*): previews would
+   share it with `main`.
+6. **Environment Variables:** add nothing that grants access elsewhere (a
+   GitHub token, a runner address), in either list. Previews start empty.
+
+Open a PR: the GitHub App comments on it with the preview link, and updates
+the comment on every push.
+
 ## Security
 
 - **Pull requests from forks run code on your machine.** On a public
@@ -174,6 +265,10 @@ change.
   serves `coolify.<domain>/webhooks/` alone, and GitHub signs every webhook.
   With `public`, consider Cloudflare Access in front of it, leaving
   `/webhooks/*` outside the policy.
+- **Previews on more zones are behind Cloudflare Access.** The playbook will
+  not route a zone in `preview_zones` without an e-mail to allow, and checks
+  after every run that the zone asks for the login. Previews on `domain`
+  stay public, as before.
 - **Coolify's ports are bound to 127.0.0.1.** Docker's published ports bypass
   ufw, so by default the dashboard (8000, 6001, 6002) and Traefik (80, 443)
   answer to the whole LAN, Traefik even for the dashboard's hostname. The
@@ -210,6 +305,11 @@ when the disk is nearly full. On a dedicated host, set
 
 Run it now with `sudo systemctl start coolify-prune-images` and check what it
 removed with `journalctl -u coolify-prune-images`.
+
+The script works per Coolify application, not per domain, so previews on
+every zone are covered. A preview's volume (`<volume>-pr-<n>`) is deleted by
+Coolify itself when the PR closes; `docker volume ls --filter name=-pr-`
+lists those still there.
 
 ## Moving to another machine
 
@@ -257,6 +357,7 @@ group_vars/all/defaults.yml      every setting and its default
 group_vars/all/local.yml         your settings (not in git; template: local.example.yml)
 roles/coolify/                   runs Coolify's installer once, binds its ports to loopback
 roles/tailscale_dashboard/       dashboard on the tailnet with Tailscale Serve
-roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in Docker
+roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in Docker,
+                                 Cloudflare Access for the other zones (tasks/access.yml)
 roles/preview_cleanup/           daily removal of unused Coolify images, Coolify cleanup mode
 ```
