@@ -38,6 +38,9 @@ services:
     image: {{ github_runner_dind_image }}
     privileged: true
     command: [dockerd, --host=unix:///run/dind/docker.sock, --group={{ github_runner_docker_gid }}]
+    # The runner's network namespace: a port a job publishes on 127.0.0.1
+    # (`docker run -p 127.0.0.1:8080:8080`) is on the job's own localhost.
+    network_mode: service:runner
     environment:
       - DOCKER_TLS_CERTDIR=
     volumes:
