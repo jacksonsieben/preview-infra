@@ -5,14 +5,19 @@
 set -euo pipefail
 
 {% set images = [github_runner_image] + ([github_runner_dind_image] if github_runner_docker else []) %}
+current=""
 {% for image in images %}
 docker pull --quiet {{ image | quote }} >/dev/null
+current+="$(docker image inspect --format '{% raw %}{{ .Id }}{% endraw %}' {{ image | quote }})"$'\n'
 {% endfor %}
 
-# A replaced version loses its tag but keeps its repository digest.
-for id in $(docker images --quiet --filter dangling=true | sort -u); do
+# A replaced version loses its tag but keeps its repository digest. An image
+# pinned by digest (repo@sha256:...) has no tag either: the configured ones are
+# skipped.
+for id in $(docker images --quiet --no-trunc --filter dangling=true | sort -u); do
+  grep -qxF "$id" <<<"$current" && continue
   digests=$(docker image inspect --format '{% raw %}{{ range .RepoDigests }}{{ println . }}{{ end }}{% endraw %}' "$id")
-  grep -q{% for image in images %} -e {{ ('^' ~ (image | regex_replace(':[^:/]*$', '')) ~ '@') | quote }}{% endfor %} <<<"$digests" || continue
+  grep -q{% for image in images %} -e {{ ('^' ~ (image | regex_replace('@sha256:[0-9a-f]+$', '') | regex_replace(':[^:/]*$', '')) ~ '@') | quote }}{% endfor %} <<<"$digests" || continue
   if docker image rm "$id" >/dev/null 2>&1; then
     echo "Removed $id"
   fi

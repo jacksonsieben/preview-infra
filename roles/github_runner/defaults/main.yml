@@ -3,7 +3,8 @@ github_api: https://api.github.com
 
 # GitHub's own runner image. `latest` follows GitHub, which stops sending jobs
 # to runners that fall too far behind; a daily timer pulls it again. Pin a tag
-# (e.g. ghcr.io/actions/actions-runner:2.330.0) for reproducible rebuilds.
+# (e.g. ghcr.io/actions/actions-runner:2.330.0) or a digest (...@sha256:...)
+# for reproducible rebuilds.
 github_runner_image: ghcr.io/actions/actions-runner:latest
 github_runner_dind_image: docker:dind
 github_runner_update_schedule: "*-*-* 04:30"
@@ -11,6 +12,10 @@ github_runner_update_schedule: "*-*-* 04:30"
 # The `runner` user and `docker` group inside github_runner_image.
 github_runner_uid: 1001
 github_runner_docker_gid: 123
+
+# How often a running runner checks again that its repository is private (or
+# that the organization's runner group refuses public ones), idle or not.
+github_runner_visibility_check_seconds: 300
 
 # Runner group for scope org. Group 1 is the organization's default group.
 github_runner_group_id: 1
@@ -37,3 +42,9 @@ github_runner_wanted: >-
   {%- endfor -%}
   {%- endfor -%}
   {{ ns.items }}
+
+# Instance names drop the slash and their compose projects the case, so a-b/c
+# and a/b-c, A/b and a/b, or a repository listed twice, would share one.
+github_runner_names_unique: >-
+  {{ github_runner_wanted.keys() | map('lower') | unique | list | length
+     == github_runner_targets | length * github_runner_instances | int }}

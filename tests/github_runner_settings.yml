@@ -1,0 +1,72 @@
+---
+# The github_runner settings: instance names, the check that they do not
+# collide, and the tool cache default for each scope. Offline: no API call,
+# nothing changed, and group_vars/all/local.yml is not read.
+#
+#   ansible-playbook tests/github_runner_settings.yml
+#
+# Task vars stand in for local.yml; they win over the defaults of vars_files.
+
+- name: GitHub Actions runner settings
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/defaults.yml
+    - ../roles/github_runner/defaults/main.yml
+  tasks:
+    - name: Check the instances of two repositories
+      ansible.builtin.assert:
+        that:
+          - github_runner_wanted == expected
+          - github_runner_names_unique | bool
+        fail_msg: "Instances: {{ github_runner_wanted }}"
+      vars:
+        github_runner_repos: [you/app.web, you/api]
+        github_runner_instances: 2
+        expected:
+          you-app.web-1: repos/you/app.web
+          you-app.web-2: repos/you/app.web
+          you-api-1: repos/you/api
+          you-api-2: repos/you/api
+
+    - name: Check the instances of an organization
+      ansible.builtin.assert:
+        that:
+          - "github_runner_wanted == {'acme-1': 'orgs/acme', 'acme-2': 'orgs/acme'}"
+          - github_runner_names_unique | bool
+        fail_msg: "Instances: {{ github_runner_wanted }}"
+      vars:
+        github_runner_scope: org
+        github_runner_org: acme
+        github_runner_repos: [you/ignored]
+        github_runner_instances: 2
+
+    - name: Check that colliding names are refused
+      ansible.builtin.assert:
+        that:
+          - not github_runner_names_unique | bool
+        fail_msg: "{{ item }} was accepted: {{ github_runner_wanted }}"
+      vars:
+        github_runner_repos: "{{ item }}"
+      loop:
+        - [a-b/c, a/b-c]
+        - [you/app, you/app]
+        - [You/App, you/app]
+
+    - name: Check that the tool cache is emptied for every job with org only
+      ansible.builtin.assert:
+        that:
+          - github_runner_tool_cache_max_gb | int == item.max
+        fail_msg: "Scope {{ item.scope }}: {{ github_runner_tool_cache_max_gb }} GB"
+      vars:
+        github_runner_scope: "{{ item.scope }}"
+      loop:
+        - {scope: repo, max: 5}
+        - {scope: org, max: 0}
+
+    - name: Check that the runners are off unless turned on
+      ansible.builtin.assert:
+        that:
+          - not github_runner_enabled
+          - github_runner_wanted == {}

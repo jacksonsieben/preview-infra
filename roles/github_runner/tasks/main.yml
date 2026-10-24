@@ -42,6 +42,14 @@
     - not github_runner_enabled
     - github_runner_update_timer.stat.exists
 
+# The token can change the repositories' settings; it is not left on the host
+# once nothing uses it. Revoke it on GitHub as well (README).
+- name: Remove the runner token
+  ansible.builtin.file:
+    path: "{{ github_runner_config_dir }}/token"
+    state: absent
+  when: not github_runner_enabled
+
 - name: Set up the runners
   ansible.builtin.include_tasks: setup.yml
   when: github_runner_enabled

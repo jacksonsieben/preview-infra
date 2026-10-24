@@ -14,6 +14,18 @@
       (README, GitHub Actions runner).
     quiet: true
 
+# a-b/c and a/b-c, or a repository listed twice, would share a name and one
+# would silently replace the other (github_runner_names_unique).
+- name: Check that every runner instance has its own name
+  ansible.builtin.assert:
+    that:
+      - github_runner_names_unique | bool
+    fail_msg: >-
+      Two entries of github_runner_repos give the same runner name once the
+      slash is dropped ({{ github_runner_wanted.keys() | list | join(', ') }}),
+      or a repository is listed twice.
+    quiet: true
+
 - name: Check the runner token
   ansible.builtin.assert:
     that:
@@ -127,6 +139,7 @@
       uid: "{{ github_runner_uid | int }}"
       min_free_disk_gb: "{{ github_runner_min_free_disk_gb | int }}"
       tool_cache_max_gb: "{{ github_runner_tool_cache_max_gb | int }}"
+      visibility_check_seconds: "{{ github_runner_visibility_check_seconds | int }}"
 
 - name: Write the runner compose file
   ansible.builtin.template:

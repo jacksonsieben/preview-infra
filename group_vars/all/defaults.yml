@@ -198,10 +198,15 @@ github_runner_cpu_quota: 200%
 github_runner_memory_max: 4G
 github_runner_tasks_max: 4096
 
-# A job only starts while the disk has this much free space (GB), and each
-# runner's tool cache (setup-node, setup-python...) is emptied past this size.
+# A job only starts while the disk has this much free space (GB).
 github_runner_min_free_disk_gb: 20
-github_runner_tool_cache_max_gb: 5
+
+# Each runner's tool cache (setup-node, setup-python...) is emptied before a
+# job past this size (GB). It is the one thing a job leaves for the next, so
+# 0, emptied every time, is the strict mode. That is the default with org,
+# where one runner serves every repository of the organization (README, Runner
+# security).
+github_runner_tool_cache_max_gb: "{{ 0 if github_runner_scope == 'org' else 5 }}"
 
 # Give jobs their own Docker daemon (Docker in Docker, privileged) for image
 # builds, service containers and `container:` jobs. They never get the host's.

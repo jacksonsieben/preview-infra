@@ -339,6 +339,11 @@ for real: the checks are `ansible-playbook site.yml --syntax-check` and
 DNS names offline and fails if production's would change, and
 `python3 tests/coolify_env.py`, which runs the `coolify_apps` role against a
 fake Coolify API and checks the environment variables.
+`ansible-playbook tests/github_runner_settings.yml` checks the runner instance
+names and defaults, and `python3 tests/github_runner_job.py` runs
+`github-runner-job` against a fake GitHub API. The *Checks* workflow
+(`.github/workflows/checks.yml`) runs them all on every pull request, on
+GitHub's runners.
 
 ## Security
 
@@ -425,7 +430,9 @@ using GitHub's minutes. The `github_runner` role is off by default
 - Only the tool cache carries over between jobs: `/opt/hostedtoolcache`, where
   `actions/setup-node`, `setup-python` and similar keep downloaded versions.
   It lives in `/var/lib/github-runner/<instance>/tool-cache`, and is emptied
-  before a job when it is larger than `github_runner_tool_cache_max_gb` (5 GB).
+  before a job when it is larger than `github_runner_tool_cache_max_gb`: 5 GB
+  with `repo`, and 0 (emptied for every job) with `org`; see
+  [Runner security](#runner-security).
 - npm, cargo and Playwright caches are dropped with the container. Restore them
   with `actions/cache` or the `cache:` option of the `setup-*` actions, as on
   GitHub's runners.
@@ -493,8 +500,10 @@ using GitHub's minutes. The `github_runner` role is off by default
    `self-hosted` wait in the queue while no runner is online.
 2. Set `github_runner_enabled: false` (or take a repository out of
    `github_runner_repos`) and rerun the playbook. It stops those runners and
-   removes their registrations; a job they are running is cancelled.
-3. Revoke the token on GitHub. The files stay on the host; to remove them too:
+   removes their registrations; a job they are running is cancelled. With
+   `github_runner_enabled: false` it also deletes `/etc/github-runner/token`.
+3. Revoke the token on GitHub. The other files stay on the host; to remove
+   them too:
    `sudo rm -r /etc/github-runner /var/lib/github-runner /usr/local/bin/github-runner-* /etc/systemd/system/github-runner* /etc/systemd/system/github_runner.slice && sudo systemctl daemon-reload`.
 
 ### Limits
@@ -523,11 +532,27 @@ when the job ends.
 
 - **Private repositories only.** A pull request from a fork of a public
   repository would run anyone's code on this host. The playbook refuses a
-  public repository, and so does `github-runner-job` before every registration,
-  so a repository made public later stops getting runners: the unit stays
-  stopped (exit code 78) with `Refused: ... is not private` in the journal.
-  With `org`, the runner group must have *Allow public repositories* turned
-  off. **This repository is public and must never use the runner.**
+  public repository, and so does `github-runner-job` before every registration.
+  A registered runner can wait days for its job, so while it waits or runs,
+  `github-runner-job` checks again every
+  `github_runner_visibility_check_seconds` (5 minutes). When a repository is
+  made public, its runners are stopped within those minutes and removed from
+  GitHub, and the units stay stopped (exit code 78) with
+  `Refused: ... is not private` in the journal. With `org`, the runner group
+  must have *Allow public repositories* turned off, and the same checks apply
+  to that setting. **This repository is public and must never use the
+  runner.**
+- **The tool cache is shared between jobs.** It is the one thing a job leaves
+  for the next: a job could replace a `node` or `python` there, and a later
+  job of the same runner, one from `main` with secrets for one, would run it.
+  With `repo`, only the repository's collaborators run jobs, and they can
+  change its workflows anyway, so the cache stays (5 GB) to keep jobs fast.
+  With `org`, one runner serves every repository of the organization, and the
+  cache would let one repository's jobs reach another's. There the default is
+  `github_runner_tool_cache_max_gb: 0`, the strict mode: the cache is emptied
+  before every job, and the `setup-*` actions download their tools each time.
+  Set 0 with `repo` too to get the strict mode, or a size with `org` if you
+  accept the risk.
 - On the private repositories, keep *Run workflows from fork pull requests*
   turned off (Settings → Actions → General), as it is by default.
 - **Jobs never get the host's Docker socket**, which would give them Coolify,
@@ -596,4 +621,7 @@ roles/coolify_apps/              the applications in coolify_apps, through Cooli
 roles/github_runner/             optional GitHub Actions runners for private repositories, one container per job
 tests/tunnel_routes.yml          offline check of the tunnel routes and DNS names
 tests/coolify_env.py             the coolify_apps role against a fake Coolify API
+tests/github_runner_settings.yml offline check of the runner instance names and defaults
+tests/github_runner_job.py       github-runner-job against a fake GitHub API
+.github/workflows/checks.yml     the syntax check and the tests above, on every pull request
 ```
