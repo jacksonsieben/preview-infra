@@ -11,7 +11,7 @@
   ansible.builtin.shell:
     cmd: >-
       { systemctl list-units --all --plain --no-legend 'github-runner@*.service';
-        ls /etc/systemd/system/multi-user.target.wants/ 2>/dev/null; }
+      ls /etc/systemd/system/multi-user.target.wants/ 2>/dev/null; }
       | grep -o 'github-runner@[^ ]*\.service'
       | sed 's/^github-runner@\(.*\)\.service$/\1/' | sort -u || true
   register: github_runner_existing
