@@ -1,0 +1,186 @@
+---
+# One entry of coolify_apps. An existing application is found by its repository
+# (and `name`, when given) and only the fields that differ are changed.
+
+# Without the environment variables: set_fact shows its facts with -v. Their
+# values are only read in env.yml, under no_log.
+- name: "Settle the settings of {{ coolify_app_item.repo }}"
+  ansible.builtin.set_fact:
+    coolify_app: >-
+      {{ coolify_app_defaults | combine(coolify_app_item | dict2items
+         | rejectattr('key', 'in', ['preview_env', 'production_env']) | items2dict) }}
+
+- name: "Work out the wanted state of {{ coolify_app.repo }}"
+  ansible.builtin.set_fact:
+    coolify_app_domains: "{{ coolify_app.domains | map('regex_replace', '^', 'http://') | list }}"
+    coolify_app_wanted:
+      ports_exposes: "{{ coolify_app.port | string }}"
+      git_branch: "{{ coolify_app.branch }}"
+      build_pack: "{{ coolify_app.build_pack }}"
+      preview_url_template: "pr-{{ coolify_pr_placeholder }}-{{ coolify_app.preview_name }}.{{ domain }}"
+    coolify_app_settings_wanted:
+      is_auto_deploy_enabled: "{{ coolify_app.auto_deploy | bool }}"
+      is_preview_deployments_enabled: "{{ coolify_app.previews | bool }}"
+      # Only repository members' PRs get a preview: anyone else's would run
+      # their code on this host.
+      is_pr_deployments_public_enabled: false
+    coolify_app_matches: >-
+      {{ coolify_applications
+         | selectattr('git_repository', 'defined')
+         | selectattr('git_repository', 'match', '(?i)^' ~ (coolify_app.repo | regex_escape) ~ '$')
+         | list }}
+
+- name: "Narrow {{ coolify_app.repo }} down by name"
+  ansible.builtin.set_fact:
+    coolify_app_matches: "{{ coolify_app_matches | selectattr('name', 'equalto', coolify_app.name) | list }}"
+  when: coolify_app.name is defined
+
+- name: "Check that {{ coolify_app.repo }} is not ambiguous"
+  ansible.builtin.assert:
+    that: coolify_app_matches | length <= 1
+    fail_msg: >-
+      Coolify has several applications for {{ coolify_app.repo }}
+      ({{ coolify_app_matches | map(attribute='name') | list }}). Add `name` to
+      its entry in coolify_apps to pick one.
+    quiet: true
+
+# --- project and environment ------------------------------------------------
+
+- name: "Create the project {{ coolify_app.project }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/projects"
+    method: POST
+    headers: &coolify_headers
+      Authorization: "Bearer {{ coolify_api_session.token }}"
+      Accept: application/json
+    body_format: json
+    body:
+      name: "{{ coolify_app.project }}"
+    status_code: 201
+  register: coolify_project_created
+  changed_when: true
+  when: coolify_projects | selectattr('name', 'equalto', coolify_app.project) | list | length == 0
+
+- name: Remember a new project
+  ansible.builtin.set_fact:
+    coolify_projects: "{{ coolify_projects + [{'name': coolify_app.project, 'uuid': coolify_project_created.json.uuid}] }}"
+  when: coolify_project_created is not skipped
+
+- name: Remember the project id
+  ansible.builtin.set_fact:
+    coolify_project_uuid: "{{ (coolify_projects | selectattr('name', 'equalto', coolify_app.project) | first).uuid }}"
+
+- name: "Look up the environment {{ coolify_app.environment }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/projects/{{ coolify_project_uuid }}/{{ coolify_app.environment | urlencode }}"
+    headers: *coolify_headers
+    status_code: [200, 404]
+  register: coolify_environment
+
+- name: "Create the environment {{ coolify_app.environment }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/projects/{{ coolify_project_uuid }}/environments"
+    method: POST
+    headers: *coolify_headers
+    body_format: json
+    body:
+      name: "{{ coolify_app.environment }}"
+    status_code: 201
+  changed_when: true
+  when: coolify_environment.status == 404
+
+# --- a new application ------------------------------------------------------
+
+# Deployed at the end, once it has its environment variables.
+
+- name: "Create the application for {{ coolify_app.repo }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/applications/private-github-app"
+    method: POST
+    headers: *coolify_headers
+    body_format: json
+    body: >-
+      {{ coolify_app_wanted | combine(coolify_app_settings_wanted, {
+           'project_uuid': coolify_project_uuid,
+           'environment_name': coolify_app.environment,
+           'server_uuid': coolify_server.uuid,
+           'github_app_uuid': coolify_github_app_found[0].uuid,
+           'git_repository': coolify_app.repo,
+           'domains': coolify_app_domains | join(','),
+           'autogenerate_domain': false,
+           'instant_deploy': false,
+         }, ({'name': coolify_app.name} if coolify_app.name is defined else {})) }}
+    status_code: 201
+  register: coolify_app_created
+  changed_when: true
+  when: coolify_app_matches | length == 0
+
+# --- an existing application ------------------------------------------------
+
+- name: "Read the application for {{ coolify_app.repo }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/applications/{{ coolify_app_matches[0].uuid }}"
+    headers: *coolify_headers
+  register: coolify_app_current
+  when: coolify_app_matches | length == 1
+
+# Only the fields that differ go in the request. Settings Coolify didn't return
+# count as different. Domains are compared as a set.
+- name: "Compare the application for {{ coolify_app.repo }}"
+  ansible.builtin.set_fact:
+    coolify_app_patch: >-
+      {%- set cur = coolify_app_current.json -%}
+      {%- set ns = namespace(patch={}) -%}
+      {%- set cur_domains = (cur.fqdn | default('', true)).split(',') | map('trim') | reject('equalto', '') | sort -%}
+      {%- if cur_domains != (coolify_app_domains | sort) -%}
+        {%- set ns.patch = ns.patch | combine({'domains': coolify_app_domains | join(',')}) -%}
+      {%- endif -%}
+      {%- for key, value in coolify_app_wanted.items() -%}
+        {%- if (cur[key] | default('', true) | string) != (value | string) -%}
+          {%- set ns.patch = ns.patch | combine({key: value}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- for key, value in coolify_app_settings_wanted.items() -%}
+        {%- set current = (cur.settings | default({}, true))[key] | default(none) -%}
+        {%- if current is none or (current | bool) != (value | bool) -%}
+          {%- set ns.patch = ns.patch | combine({key: value | bool}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.patch | to_json }}
+  when: coolify_app_current is not skipped
+
+# A change Traefik or the build must see (domains, port, build, branch)
+# redeploys right away; the others take effect on the next deployment.
+- name: "Update the application for {{ coolify_app.repo }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/applications/{{ coolify_app_matches[0].uuid }}"
+    method: PATCH
+    headers: *coolify_headers
+    body_format: json
+    body: >-
+      {{ coolify_app_patch | from_json | combine(
+           {'instant_deploy': true}
+           if (coolify_app_patch | from_json).keys() | intersect(['domains', 'ports_exposes', 'build_pack', 'git_branch'])
+           else {}) }}
+  changed_when: true
+  when:
+    - coolify_app_current is not skipped
+    - coolify_app_patch | from_json | length > 0
+
+# --- environment variables --------------------------------------------------
+
+- name: "Set the environment variables of {{ coolify_app.repo }}"
+  ansible.builtin.include_tasks: env.yml
+  vars:
+    coolify_env_app_uuid: >-
+      {{ coolify_app_created.json.uuid if coolify_app_created is not skipped else coolify_app_matches[0].uuid }}
+    coolify_env_label: "{{ coolify_app.repo }}"
+
+- name: "Deploy the new application for {{ coolify_app.repo }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/applications/{{ coolify_app_created.json.uuid }}/start"
+    method: POST
+    headers: *coolify_headers
+    status_code: 200
+  changed_when: true
+  when: coolify_app_created is not skipped

@@ -15,11 +15,116 @@ domain: example.com
 coolify_hostname: "coolify.{{ domain }}"
 preview_wildcard: "*.{{ domain }}"
 
+# Hostnames that are not covered by the wildcard but should reach Coolify, for an
+# application deployed here as production. The wildcard already covers every
+# first-level name (www included); the apex is the usual one to add:
+#
+#   production_hostnames: ["{{ domain }}"]
+#
+# Each gets a tunnel route to Traefik and a proxied CNAME, which replaces any
+# record the name had. Then give the application that domain in Coolify.
+production_hostnames: []
+
+# ---------------------------------------------------------------------------
+# Applications, through Coolify's API
+#
+# Declared here, created or corrected through Coolify's API on every run. The
+# GitHub App they deploy from is the one manual step (README, Step 4): name it
+# in coolify_github_app. Each entry needs `repo` and `project`; the rest has
+# defaults in roles/coolify_apps/defaults/main.yml.
+#
+#   coolify_apps:
+#     - repo: you/site
+#       project: Site
+#       domains: ["{{ domain }}", "www.{{ domain }}"]   # served as http:// (see README)
+#       port: 8080
+#       preview_name: preview   # previews at pr-<n>-preview.<domain>
+#       preview_env: {}         # optional, see "Environment variables" below
+#       production_env: {}
+# ---------------------------------------------------------------------------
+coolify_github_app: ""
+coolify_apps: []
+
 # Where the Coolify dashboard is reachable:
 #   tailscale  only from your tailnet, at https://<machine>.<tailnet>.ts.net.
 #              The tunnel serves just coolify.<domain>/webhooks/ for GitHub.
 #   public     at coolify.<domain> through the tunnel, behind the login only.
 coolify_dashboard: tailscale
+
+# ---------------------------------------------------------------------------
+# More zones
+#
+# Other zones whose previews also go through this host, each on the same
+# Cloudflare account as `domain`. Each gets its wildcard routed to Coolify and
+# a Cloudflare Access application in front of it: only the e-mails listed can
+# open anything on the wildcard. Leave empty for a single domain.
+#
+#   preview_zones:
+#     - zone: example.dev
+#       wildcard: "*.example.dev"        # optional, this is the default
+#       access_emails: [you@example.com] # optional, default preview_access_emails
+#
+# The wildcard stays one level deep (pr-12.example.dev), for the same
+# certificate reason as above. Coolify's own hostname stays on `domain`.
+# ---------------------------------------------------------------------------
+preview_zones: []
+
+# Who may open the previews on preview_zones (Cloudflare Access, one-time PIN
+# by e-mail). Required for every zone in preview_zones: there is no open
+# preview.
+preview_access_emails: []
+
+# How long a Cloudflare Access login lasts before it asks again.
+preview_access_session_duration: 24h
+
+# ---------------------------------------------------------------------------
+# Applications, by hand
+#
+# The Coolify applications that get PR previews, with what their image needs.
+# Coolify keeps its applications in its own database and these are created in
+# its dashboard (README, More zones and apps); the playbook checks that each
+# one's zone is routed and protected, and prints the values to enter at the
+# end. Use this for an app on one of preview_zones, or one that needs a health
+# check or storage: coolify_apps above can't set those yet. A repository is in
+# one of the two lists, not both.
+#
+#   preview_apps:
+#     - name: myapp
+#       repository: you/myapp
+#       zone: example.dev              # domain or one of preview_zones
+#       port: 8080                     # the port the image listens on
+#       healthcheck_path: /health      # GET, answers 200 when ready
+#       data_path: /data               # optional: a volume, emptied per preview
+#       preview_name: ""               # optional: pr-12-<preview_name>.<zone>,
+#                                      # main-<preview_name>.<zone> for `main`
+#       preview_env: {}                # optional, see "Environment variables" below
+#       production_env: {}
+#
+# With several apps on one zone, give each a preview_name: PR numbers repeat
+# across repositories.
+# ---------------------------------------------------------------------------
+preview_apps: []
+
+# ---------------------------------------------------------------------------
+# Environment variables
+#
+# Any entry of coolify_apps or preview_apps can set environment variables
+# through Coolify's API: preview_env only in PR deployments, production_env
+# only in the main one. Values are strings, usually a 1Password lookup; the
+# playbook never prints them.
+#
+#   preview_env:
+#     MYAPP_PREVIEW: "1"
+#     MYAPP_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'MyApp preview',
+#                              field='credential', vault='Ansible') }}"
+#   production_env: {}
+#
+# Variables the playbook creates carry the comment in coolify_env_comment and
+# are deleted once taken out of both lists; the ones made by hand in Coolify
+# are never touched. Values are literal and runtime-only, and reach the app on
+# its next deployment. A preview_apps entry must exist in Coolify before it
+# sets any.
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Secrets

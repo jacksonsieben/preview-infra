@@ -2,6 +2,13 @@
 - name: Preview host
   hosts: preview
   become: true
+  vars:
+    # preview_apps without their environment variables: a loop shows its whole
+    # item with -v, values included.
+    preview_apps_shown: >-
+      {{ preview_apps | map('dict2items')
+         | map('rejectattr', 'key', 'in', ['preview_env', 'production_env'])
+         | map('items2dict') | list }}
   pre_tasks:
     - name: Check the settings
       ansible.builtin.assert:
@@ -14,11 +21,63 @@
           cloudflare_api_token_ref (README, Step 2).
         quiet: true
       no_log: true
+
+    # An app on a zone that is neither `domain` nor in preview_zones would get
+    # no route, and none of the Access login of preview_zones.
+    - name: Check the preview apps
+      ansible.builtin.assert:
+        that:
+          - item.name | default('') | length > 0
+          - item.repository | default('') is match('^[^/\\s]+/[^/\\s]+$')
+          - item.zone | default('') in [domain] + preview_zones | map(attribute='zone', default='') | list
+          - item.port | default('') | string is match('^[0-9]+$')
+          - item.healthcheck_path | default('') is match('^/')
+        fail_msg: >-
+          Each entry of preview_apps needs a name, a repository (owner/name), a
+          zone that is `domain` or one of preview_zones, a port and a
+          healthcheck_path starting with /.
+        quiet: true
+      loop: "{{ preview_apps_shown }}"
+      loop_control:
+        label: "{{ item.name | default('?') }}"
+
+    # coolify_apps are changed through Coolify's API on every run; an app set up
+    # by hand from preview_apps would be overwritten with their settings.
+    - name: Check that no app is in both coolify_apps and preview_apps
+      ansible.builtin.assert:
+        that: >-
+          coolify_apps | map(attribute='repo') | map('lower')
+          | intersect(preview_apps | map(attribute='repository') | map('lower')) | length == 0
+        fail_msg: >-
+          A repository is listed in both coolify_apps and preview_apps. Keep it
+          in one of them (README, Step 4 and More zones and apps).
+        quiet: true
   roles:
     - coolify
     - role: tailscale_dashboard
       when: coolify_dashboard == 'tailscale'
     - cloudflare_tunnel
     - preview_cleanup
+    - role: coolify_apps
+      when: coolify_apps | length > 0 or preview_apps | length > 0
     # Stops the runners when github_runner_enabled is false.
     - github_runner
+  post_tasks:
+    # Coolify keeps its applications in its own database; these are the values
+    # to enter in its dashboard (README, More zones and apps).
+    - name: Coolify settings for the preview apps
+      ansible.builtin.debug:
+        msg:
+          - "Resource: Private Repository (with GitHub App), {{ item.repository }}, branch main"
+          - "Build Pack: Dockerfile. Ports Exposes: {{ item.port }}"
+          - "Domains: http://{{ 'main' ~ suffix }}.{{ item.zone }}"
+          - "Health check: on, path {{ item.healthcheck_path }}, port {{ item.port }}"
+          - "Persistent storage: {{ ('volume mounted at ' ~ item.data_path) if item.data_path | default('') else 'none' }}"
+          - "Preview Deployments and Auto Deploy: on"
+          - "Preview URL Template: pr-{% raw %}{{pr_id}}{% endraw %}{{ suffix }}.{{ item.zone }}"
+          - "Environment variables: none by hand; the playbook sets preview_env and production_env"
+      vars:
+        suffix: "{{ ('-' ~ item.preview_name) if item.preview_name | default('') else '' }}"
+      loop: "{{ preview_apps_shown }}"
+      loop_control:
+        label: "{{ item.name }}"

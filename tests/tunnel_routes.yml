@@ -1,0 +1,66 @@
+---
+# The tunnel routes and DNS names a setup like production's renders to.
+# Offline: no API call, nothing changed, and group_vars/all/local.yml is not
+# read (only the defaults and tests/operator.yml).
+#
+#   ansible-playbook tests/tunnel_routes.yml
+#
+# Dropping production_hostnames from cloudflare_tunnel_ingress or
+# cloudflare_tunnel_dns_names takes the apex site down; this fails if it does.
+
+- name: Tunnel routes and DNS names
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Read the defaults and a setup shaped like production's
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      loop:
+        - "{{ playbook_dir }}/../group_vars/all/defaults.yml"
+        - "{{ playbook_dir }}/../roles/cloudflare_tunnel/defaults/main.yml"
+        - "{{ playbook_dir }}/operator.yml"
+
+    - name: Check that every production hostname is routed and in DNS
+      ansible.builtin.assert:
+        that:
+          - production_hostnames | length > 0
+          - production_hostnames | difference(cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list) == []
+          - production_hostnames | difference(cloudflare_tunnel_dns_names) == []
+        fail_msg: >-
+          production_hostnames {{ production_hostnames }} must each have a tunnel
+          route and a DNS record. Routes: {{ cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list }}.
+          DNS: {{ cloudflare_tunnel_dns_names }}.
+
+    - name: Check the tunnel routes
+      ansible.builtin.assert:
+        that: cloudflare_tunnel_ingress == expected
+        fail_msg: "Routes: {{ cloudflare_tunnel_ingress }}"
+      vars:
+        expected:
+          - {hostname: coolify.example.com, path: ^/webhooks/, service: "http://127.0.0.1:8000"}
+          - {hostname: coolify.example.com, service: "http_status:404"}
+          - {hostname: example.com, service: "http://127.0.0.1:80"}
+          - {hostname: "*.example.com", service: "http://127.0.0.1:80"}
+          - {hostname: "*.example.dev", service: "http://127.0.0.1:80"}
+          - {service: "http_status:404"}
+
+    - name: Check the DNS names
+      ansible.builtin.assert:
+        that:
+          - cloudflare_tunnel_dns_names == ['coolify.example.com', '*.example.com', 'example.com']
+          - cloudflare_extra_zones | map(attribute='wildcard') | list == ['*.example.dev']
+        fail_msg: >-
+          DNS in domain: {{ cloudflare_tunnel_dns_names }}. Other zones:
+          {{ cloudflare_extra_zones | map(attribute='wildcard') | list }}
+
+    - name: Leave production_hostnames empty
+      ansible.builtin.set_fact:
+        production_hostnames: []
+
+    - name: Check that nothing outside the wildcards is routed then
+      ansible.builtin.assert:
+        that:
+          - "'example.com' not in cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list"
+          - cloudflare_tunnel_dns_names == ['coolify.example.com', '*.example.com']
+        fail_msg: "Routes: {{ cloudflare_tunnel_ingress }}. DNS: {{ cloudflare_tunnel_dns_names }}"

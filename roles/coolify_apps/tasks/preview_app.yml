@@ -1,0 +1,38 @@
+---
+# One entry of preview_apps. The application itself is made by hand in Coolify
+# (README, More zones and apps); only its environment variables are set here.
+# It is found by its repository, and by `name` when the repository has several.
+
+- name: "Find the application for {{ coolify_app_item.repository }}"
+  ansible.builtin.set_fact:
+    coolify_preview_matches: >-
+      {{ coolify_applications
+         | selectattr('git_repository', 'defined')
+         | selectattr('git_repository', 'match', '(?i)^' ~ (coolify_app_item.repository | regex_escape) ~ '$')
+         | list }}
+
+- name: "Narrow {{ coolify_app_item.repository }} down by name"
+  ansible.builtin.set_fact:
+    coolify_preview_matches: "{{ coolify_preview_matches | selectattr('name', 'equalto', coolify_app_item.name) | list }}"
+  when: coolify_preview_matches | length > 1
+
+# One that sets nothing may not be in Coolify yet: nothing to do then.
+- name: "Check that {{ coolify_app_item.repository }} is in Coolify"
+  ansible.builtin.assert:
+    that: coolify_preview_matches | length == 1
+    fail_msg: >-
+      {{ coolify_app_item.name }} sets preview_env or production_env, but Coolify
+      has no single application for {{ coolify_app_item.repository }}
+      named '{{ coolify_app_item.name }}'. Create it first (README, More zones
+      and apps), or give it the Coolify application's name.
+    quiet: true
+  when: >-
+    coolify_app_item.preview_env | default({}, true) | length > 0
+    or coolify_app_item.production_env | default({}, true) | length > 0
+
+- name: "Set the environment variables of {{ coolify_app_item.repository }}"
+  ansible.builtin.include_tasks: env.yml
+  vars:
+    coolify_env_app_uuid: "{{ coolify_preview_matches[0].uuid }}"
+    coolify_env_label: "{{ coolify_app_item.name }}"
+  when: coolify_preview_matches | length == 1
