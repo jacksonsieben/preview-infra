@@ -14,6 +14,8 @@ preview is removed when the PR closes.
 - **This playbook** installs both and sets up the tunnel routes and DNS
   through the Cloudflare API, so you can rebuild the whole thing on another
   machine with one command.
+- **A GitHub Actions runner** (optional) runs the Actions jobs of your private
+  repositories here, one container per job, instead of on GitHub's minutes.
 
 ```
 PR opened / pushed ─► GitHub App webhook ─► coolify.example.com/webhooks/ ─┐
@@ -211,6 +213,139 @@ when the disk is nearly full. On a dedicated host, set
 Run it now with `sudo systemctl start coolify-prune-images` and check what it
 removed with `journalctl -u coolify-prune-images`.
 
+## GitHub Actions runner (optional)
+
+Private repositories can run their GitHub Actions jobs on this host instead of
+using GitHub's minutes. The `github_runner` role is off by default
+(`github_runner_enabled: false`). It runs GitHub's own runner image
+(`ghcr.io/actions/actions-runner`), **one job per container**:
+
+- `github-runner@<owner>-<repo>-<n>.service`, `github_runner_instances` of
+  them per repository. Each runner takes one job at a time.
+- For every job, `github-runner-job` checks that the repository is private,
+  registers a just-in-time runner on GitHub that is valid for that single job,
+  and starts it with `docker compose`, next to its own Docker daemon. When the
+  job ends it removes both containers, their volumes, the work directory and the
+  registration, and systemd starts a fresh runner for the next job.
+- Only the tool cache carries over between jobs: `/opt/hostedtoolcache`, where
+  `actions/setup-node`, `setup-python` and similar keep downloaded versions.
+  It lives in `/var/lib/github-runner/<instance>/tool-cache`, and is emptied
+  before a job when it is larger than `github_runner_tool_cache_max_gb` (5 GB).
+- npm, cargo and Playwright caches are dropped with the container. Restore them
+  with `actions/cache` or the `cache:` option of the `setup-*` actions, as on
+  GitHub's runners.
+- The image is a plain Ubuntu with the runner, the Docker CLI and `sudo`. It
+  does not have the toolchains that come preinstalled on `ubuntu-latest`: set
+  them up with the `setup-*` actions (`actions/setup-node`,
+  `dtolnay/rust-toolchain`, ...), and install browsers with
+  `npx playwright install --with-deps`.
+- A daily timer (`github-runner-update.timer`) pulls the runner image again,
+  so new jobs get GitHub's current runner. GitHub stops sending jobs to
+  runners that fall too far behind. The timer also removes the image versions
+  it replaced.
+
+### Turn it on
+
+1. **Token.** The runner needs a token to register itself for every job.
+   GitHub → Settings → Developer settings → Personal access tokens →
+   *Fine-grained tokens* → *Generate new token*:
+
+   | | Scope `repo` (personal account) | Scope `org` |
+   |---|---|---|
+   | Resource owner | your account | the organization |
+   | Repository access | *Only select repositories*: the private ones | none needed |
+   | Permission | Repository → **Administration: Read and write** | Organization → **Self-hosted runners: Read and write** |
+
+   GitHub has no narrower permission for repository runners, and
+   *Administration* also allows changing the repository's settings. The token
+   is kept on the host in `/etc/github-runner/token`, readable by root only.
+   Give the playbook the token as `GITHUB_RUNNER_TOKEN`, or keep it in
+   1Password and set `github_runner_token_ref: op://<vault>/<item>/credential`.
+   Fine-grained tokens expire: when it does, the runners stop with
+   `Refused: ... HTTP 401` in the journal; create a new one and rerun.
+2. **Settings** in `group_vars/all/local.yml`:
+
+   ```yaml
+   github_runner_enabled: true
+   github_runner_scope: repo          # or org, with github_runner_org: <org>
+   github_runner_repos:
+     - your-user/private-repo
+   github_runner_instances: 1         # runners per repository
+   ```
+
+   Repositories under a personal account can only have repository runners
+   (`repo`). With `org`, the runners join the organization's default runner
+   group (`github_runner_group_id: 1`), which must not allow public
+   repositories.
+3. **Run the playbook** (Step 3). It stops if a repository is public, or the
+   token cannot read it.
+4. **Check.** The repository's Settings → Actions → Runners lists
+   `preview-host-<owner>-<repo>-1-<time>` as *Idle*. On the host:
+   `systemctl status 'github-runner@*'` and
+   `journalctl -u 'github-runner@*' -f`.
+5. **Use it** in a workflow of that repository:
+
+   ```yaml
+   runs-on: [self-hosted, preview-host]
+   ```
+
+   The labels are `github_runner_labels` (`self-hosted`, `linux`, `x64`,
+   `preview-host`).
+
+### Turn it off, back to GitHub's runners
+
+1. Change `runs-on` back to `ubuntu-latest` in the workflows. Jobs that ask for
+   `self-hosted` wait in the queue while no runner is online.
+2. Set `github_runner_enabled: false` (or take a repository out of
+   `github_runner_repos`) and rerun the playbook. It stops those runners and
+   removes their registrations; a job they are running is cancelled.
+3. Revoke the token on GitHub. The files stay on the host; to remove them too:
+   `sudo rm -r /etc/github-runner /var/lib/github-runner /usr/local/bin/github-runner-* /etc/systemd/system/github-runner* /etc/systemd/system/github_runner.slice && sudo systemctl daemon-reload`.
+
+### Limits
+
+Every runner, its Docker daemon and the containers its jobs start run in one
+systemd slice, `github_runner.slice`, with limits for all of them together.
+That way the jobs cannot take the CPU or memory the previews need:
+
+| Setting | Default | |
+|---|---|---|
+| `github_runner_cpu_quota` | `200%` | two cores, for all runners together |
+| `github_runner_memory_max` | `4G` | past it, the kernel kills processes of a job, not of the previews; no swap |
+| `github_runner_tasks_max` | `4096` | processes and threads |
+| `github_runner_min_free_disk_gb` | `20` | a runner waits for this much free disk before it takes a job |
+
+Under contention, the runners also get half the CPU and disk weight of
+everything else. Check the usage with `systemd-cgtop github_runner.slice`. The
+limits need Docker's systemd cgroup driver, the default with cgroup v2; the
+playbook stops if Docker uses another one.
+
+A single job's disk use has no hard limit. Its files are in
+`/var/lib/github-runner/<instance>/work` and in Docker volumes, and are removed
+when the job ends.
+
+### Runner security
+
+- **Private repositories only.** A pull request from a fork of a public
+  repository would run anyone's code on this host. The playbook refuses a
+  public repository, and so does `github-runner-job` before every registration,
+  so a repository made public later stops getting runners: the unit stays
+  stopped (exit code 78) with `Refused: ... is not private` in the journal.
+  With `org`, the runner group must have *Allow public repositories* turned
+  off. **This repository is public and must never use the runner.**
+- On the private repositories, keep *Run workflows from fork pull requests*
+  turned off (Settings → Actions → General), as it is by default.
+- **Jobs never get the host's Docker socket**, which would give them Coolify,
+  the previews and the tunnel token. With `github_runner_docker: true` (the
+  default) every job gets its own Docker daemon (Docker in Docker), removed with
+  the job. That daemon has to run privileged, so a job that tries can still
+  become root on the host. That is the same trust as the code you deploy as
+  previews, and the reason this runner serves your private repositories only.
+  Set `github_runner_docker: false` if the jobs do not build or run
+  containers; the runner container is then unprivileged.
+- Jobs reach the network like any machine on the LAN. Coolify's ports are on
+  127.0.0.1 and not reachable from the jobs.
+
 ## Moving to another machine
 
 1. On the old host: `docker compose -f /opt/cloudflared/compose.yml down`. Two
@@ -251,7 +386,7 @@ redirects it to HTTPS.
 ## Layout
 
 ```
-site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_cleanup
+site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_cleanup, github_runner
 inventory/hosts.yml              which machine is the preview host
 group_vars/all/defaults.yml      every setting and its default
 group_vars/all/local.yml         your settings (not in git; template: local.example.yml)
@@ -259,4 +394,5 @@ roles/coolify/                   runs Coolify's installer once, binds its ports 
 roles/tailscale_dashboard/       dashboard on the tailnet with Tailscale Serve
 roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in Docker
 roles/preview_cleanup/           daily removal of unused Coolify images, Coolify cleanup mode
+roles/github_runner/             optional GitHub Actions runners for private repositories, one container per job
 ```
