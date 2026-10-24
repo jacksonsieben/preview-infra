@@ -1,0 +1,38 @@
+# The offline checks of every infra PR: the playbook's syntax and the tests in
+# tests/. Nothing here reaches the preview host or any API.
+#
+# Always on GitHub's runners: this repository is public, and the self-hosted
+# runner of the github_runner role serves private repositories only.
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Ansible
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install -r requirements.yml
+      - name: Syntax check
+        run: ansible-playbook site.yml --syntax-check
+      - name: Tunnel routes
+        run: ansible-playbook tests/tunnel_routes.yml
+      - name: Coolify environment variables
+        run: python3 tests/coolify_env.py
+      - name: Runner settings
+        run: ansible-playbook tests/github_runner_settings.yml
+      - name: Runner job script
+        run: python3 tests/github_runner_job.py
