@@ -22,15 +22,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      # The `ansible` package ships community.general (requirements.yml), so
+      # the checks do not depend on Galaxy, which often answers 500 to
+      # GitHub's runners.
       - name: Install Ansible
         run: |
-          pip install ansible-core
-          # Galaxy answers 500 now and then; try again before failing.
-          for attempt in 1 2 3 4; do
-            ansible-galaxy collection install -r requirements.yml && exit 0
-            sleep $((attempt * 20))
-          done
-          exit 1
+          pip install ansible
+          ansible-galaxy collection list community.general
       - name: Syntax check
         run: ansible-playbook site.yml --syntax-check
       - name: Tunnel routes
