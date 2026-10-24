@@ -25,7 +25,12 @@ jobs:
       - name: Install Ansible
         run: |
           pip install ansible-core
-          ansible-galaxy collection install -r requirements.yml
+          # Galaxy answers 500 now and then; try again before failing.
+          for attempt in 1 2 3 4; do
+            ansible-galaxy collection install -r requirements.yml && exit 0
+            sleep $((attempt * 20))
+          done
+          exit 1
       - name: Syntax check
         run: ansible-playbook site.yml --syntax-check
       - name: Tunnel routes
