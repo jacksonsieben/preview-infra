@@ -1,0 +1,55 @@
+---
+# Self-hosted GitHub Actions runners for private repositories. Every job runs
+# in fresh containers (the runner and its own Docker daemon) that are removed
+# afterwards. github-runner-job registers each runner just in time, for one
+# job, and refuses public repositories every time it does.
+#
+# With github_runner_enabled: false (the default) the role only stops runners
+# a previous run set up, so turning it off is a rerun.
+
+- name: Find the runner instances on this host
+  ansible.builtin.shell:
+    cmd: >-
+      { systemctl list-units --all --plain --no-legend 'github-runner@*.service';
+        ls /etc/systemd/system/multi-user.target.wants/ 2>/dev/null; }
+      | grep -o 'github-runner@[^ ]*\.service'
+      | sed 's/^github-runner@\(.*\)\.service$/\1/' | sort -u || true
+  register: github_runner_existing
+  changed_when: false
+
+# Stopping a runner removes its containers and its registration on GitHub. A
+# job it is running is cancelled.
+- name: Stop the runners that are no longer configured
+  ansible.builtin.systemd_service:
+    name: "github-runner@{{ item }}.service"
+    state: stopped
+    enabled: false
+  loop: >-
+    {{ github_runner_existing.stdout_lines
+       | difference(github_runner_wanted.keys() | list if github_runner_enabled else []) }}
+
+- name: Check for the runner update timer
+  ansible.builtin.stat:
+    path: /etc/systemd/system/github-runner-update.timer
+  register: github_runner_update_timer
+
+- name: Stop the runner update timer
+  ansible.builtin.systemd_service:
+    name: github-runner-update.timer
+    state: stopped
+    enabled: false
+  when:
+    - not github_runner_enabled
+    - github_runner_update_timer.stat.exists
+
+# The token can change the repositories' settings; it is not left on the host
+# once nothing uses it. Revoke it on GitHub as well (README).
+- name: Remove the runner token
+  ansible.builtin.file:
+    path: "{{ github_runner_config_dir }}/token"
+    state: absent
+  when: not github_runner_enabled
+
+- name: Set up the runners
+  ansible.builtin.include_tasks: setup.yml
+  when: github_runner_enabled

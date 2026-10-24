@@ -58,4 +58,13 @@ coolify_apps:
 #       MYAPP_PREVIEW: "1"
 #       MYAPP_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'MyApp preview code', field='credential', vault='Ansible') }}"
 
+# GitHub Actions runner for your private repositories (README, GitHub Actions
+# runner). The token goes in GITHUB_RUNNER_TOKEN or in 1Password.
+# github_runner_enabled: true
+# github_runner_scope: repo
+# github_runner_repos:
+#   - your-user/private-repo
+# github_runner_instances: 1
+# github_runner_token_ref: op://Ansible/GitHub runner token/credential
+
 # Running on another machine over SSH: put it in inventory/hosts.yml.

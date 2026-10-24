@@ -2,6 +2,10 @@
 *.retry
 .ansible/
 
+# Python
+__pycache__/
+*.pyc
+
 # Your own settings (template: local.example.yml)
 group_vars/all/local.yml
 

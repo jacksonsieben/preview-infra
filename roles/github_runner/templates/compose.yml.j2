@@ -1,0 +1,58 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# One GitHub Actions job: the runner{{ ' and its own Docker daemon' if github_runner_docker else '' }}.
+# github-runner-job starts this for every job, with the variables below, and
+# removes the containers and their volumes when the job ends. Only the tool
+# cache carries over to the next job.
+services:
+  runner:
+    image: {{ github_runner_image }}
+{% if github_runner_docker %}
+    # The runner comes up first, so the externals volume gets its files, and
+    # waits for the Docker daemon before it takes a job.
+    command: [bash, -c, "until [ -S /run/dind/docker.sock ]; do sleep 1; done; exec /home/runner/run.sh"]
+{% else %}
+    command: [/home/runner/run.sh]
+{% endif %}
+    environment:
+      # Just-in-time registration, valid for this one job.
+      - ACTIONS_RUNNER_INPUT_JITCONFIG
+      - RUNNER_TOOL_CACHE=/opt/hostedtoolcache
+{% if github_runner_docker %}
+      - DOCKER_HOST=unix:///run/dind/docker.sock
+{% endif %}
+    volumes:
+      - ${RUNNER_WORK:?}:/home/runner/_work
+      - ${RUNNER_TOOL_CACHE_DIR:?}:/opt/hostedtoolcache
+{% if github_runner_docker %}
+      - externals:/home/runner/externals
+      - dind-sock:/run/dind
+{% endif %}
+    cgroup_parent: {{ github_runner_slice }}
+{% if github_runner_docker %}
+
+  # The job's Docker daemon. Builds, service containers and `container:` jobs
+  # run here, never on the host's daemon, which runs Coolify, the previews and
+  # cloudflared. It has to be privileged (README, GitHub Actions runner).
+  docker:
+    image: {{ github_runner_dind_image }}
+    privileged: true
+    command: [dockerd, --host=unix:///run/dind/docker.sock, --group={{ github_runner_docker_gid }}]
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    volumes:
+      - docker-data:/var/lib/docker
+      - dind-sock:/run/dind
+      # Same paths as in the runner: job and service containers mount them.
+      - ${RUNNER_WORK:?}:/home/runner/_work
+      - ${RUNNER_TOOL_CACHE_DIR:?}:/opt/hostedtoolcache
+      - externals:/home/runner/externals
+    cgroup_parent: {{ github_runner_slice }}
+    depends_on:
+      - runner
+
+volumes:
+  docker-data:
+  dind-sock:
+  externals:
+{% endif %}

@@ -136,11 +136,14 @@ preview_apps: []
 #   COOLIFY_ROOT_USERNAME   \
 #   COOLIFY_ROOT_EMAIL       > or coolify_root_ref, a Login item with
 #   COOLIFY_ROOT_PASSWORD   /   `username` = email, `password`, and `Name`
+#   GITHUB_RUNNER_TOKEN     or github_runner_token_ref (only with
+#                           github_runner_enabled; see the README)
 #
 # The Coolify login is only needed on the first run, when Coolify is installed.
 # ---------------------------------------------------------------------------
 cloudflare_api_token_ref: ""
 coolify_root_ref: ""
+github_runner_token_ref: ""
 
 cloudflare_api_token: >-
   {{ lookup('env', 'CLOUDFLARE_API_TOKEN')
@@ -158,3 +161,53 @@ coolify_root_password: >-
   {{ lookup('env', 'COOLIFY_ROOT_PASSWORD')
      or (lookup('ansible.builtin.pipe', 'op read ' ~ ((coolify_root_ref ~ '/password') | quote))
          if coolify_root_ref else '') }}
+github_runner_token: >-
+  {{ lookup('env', 'GITHUB_RUNNER_TOKEN')
+     or (lookup('ansible.builtin.pipe', 'op read ' ~ (github_runner_token_ref | quote))
+         if github_runner_token_ref else '') }}
+
+# ---------------------------------------------------------------------------
+# GitHub Actions runner (optional, off by default)
+#
+# Self-hosted runners for your PRIVATE repositories, so their jobs run here
+# instead of using GitHub's minutes. Each job gets a fresh container that is
+# discarded afterwards. Public repositories are refused when the runner
+# registers, every time (README, GitHub Actions runner).
+# ---------------------------------------------------------------------------
+github_runner_enabled: false
+
+#   repo  one set of runners per repository in github_runner_repos. The only
+#         choice for repositories under a personal account.
+#   org   one set of runners for the organization github_runner_org, in a
+#         runner group that does not allow public repositories.
+github_runner_scope: repo
+github_runner_repos: []       # owner/name, private only
+github_runner_org: ""
+
+# Runners per repository (scope repo) or for the organization (scope org).
+# Each one takes a single job at a time.
+github_runner_instances: 1
+
+# Workflows pick the runner with `runs-on: [self-hosted, preview-host]`.
+github_runner_labels: [self-hosted, linux, x64, preview-host]
+
+# Limits shared by all runners and their jobs together, so the previews keep
+# running. CPU in percent of one core (200% = two cores). Under contention the
+# runners also get half the CPU and disk weight of everything else.
+github_runner_cpu_quota: 200%
+github_runner_memory_max: 4G
+github_runner_tasks_max: 4096
+
+# A job only starts while the disk has this much free space (GB).
+github_runner_min_free_disk_gb: 20
+
+# Each runner's tool cache (setup-node, setup-python...) is emptied before a
+# job past this size (GB). It is the one thing a job leaves for the next, so
+# 0, emptied every time, is the strict mode. That is the default with org,
+# where one runner serves every repository of the organization (README, Runner
+# security).
+github_runner_tool_cache_max_gb: "{{ 0 if github_runner_scope == 'org' else 5 }}"
+
+# Give jobs their own Docker daemon (Docker in Docker, privileged) for image
+# builds, service containers and `container:` jobs. They never get the host's.
+github_runner_docker: true

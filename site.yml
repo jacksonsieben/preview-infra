@@ -60,6 +60,8 @@
     - preview_cleanup
     - role: coolify_apps
       when: coolify_apps | length > 0 or preview_apps | length > 0
+    # Stops the runners when github_runner_enabled is false.
+    - github_runner
   post_tasks:
     # Coolify keeps its applications in its own database; these are the values
     # to enter in its dashboard (README, More zones and apps).

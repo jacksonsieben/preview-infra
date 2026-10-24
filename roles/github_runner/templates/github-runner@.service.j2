@@ -1,0 +1,25 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# One runner instance. Each start runs a single job; systemd starts it again
+# for the next one.
+[Unit]
+Description=GitHub Actions runner %i
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Slice={{ github_runner_slice }}
+ExecStart=/usr/local/bin/github-runner-job %i
+Restart=always
+RestartSec=5
+# Refused to register (public repository, token rejected): stay stopped until
+# the settings are fixed and the playbook runs again.
+RestartPreventExitStatus=78
+# github-runner-job removes the job's containers and the registration on stop.
+KillMode=mixed
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
