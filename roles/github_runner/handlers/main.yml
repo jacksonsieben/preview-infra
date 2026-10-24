@@ -1,0 +1,6 @@
+---
+# Running runners are not restarted: the next job picks up the new unit, slice
+# limits, compose file and settings, and a job in progress is left alone.
+- name: Reload systemd for the runners
+  ansible.builtin.systemd_service:
+    daemon_reload: true

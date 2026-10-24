@@ -1,0 +1,39 @@
+---
+github_api: https://api.github.com
+
+# GitHub's own runner image. `latest` follows GitHub, which stops sending jobs
+# to runners that fall too far behind; a daily timer pulls it again. Pin a tag
+# (e.g. ghcr.io/actions/actions-runner:2.330.0) for reproducible rebuilds.
+github_runner_image: ghcr.io/actions/actions-runner:latest
+github_runner_dind_image: docker:dind
+github_runner_update_schedule: "*-*-* 04:30"
+
+# The `runner` user and `docker` group inside github_runner_image.
+github_runner_uid: 1001
+github_runner_docker_gid: 123
+
+# Runner group for scope org. Group 1 is the organization's default group.
+github_runner_group_id: 1
+
+# Runner names on GitHub: <prefix>-<instance>-<time>.
+github_runner_name_prefix: "{{ inventory_hostname }}"
+
+github_runner_config_dir: /etc/github-runner
+github_runner_data_dir: /var/lib/github-runner
+# systemd slice that holds every runner and job, with the shared limits.
+github_runner_slice: github_runner.slice
+
+# One entry per systemd instance (github-runner@<name>.service), built from
+# github_runner_scope, github_runner_repos/org and github_runner_instances.
+github_runner_targets: >-
+  {{ ['orgs/' ~ github_runner_org] if github_runner_scope == 'org'
+     else github_runner_repos | map('regex_replace', '^', 'repos/') | list }}
+github_runner_wanted: >-
+  {%- set ns = namespace(items={}) -%}
+  {%- for target in github_runner_targets -%}
+  {%- for n in range(1, github_runner_instances | int + 1) -%}
+  {%- set ns.items = ns.items | combine({
+        (target.split('/', 1)[1] | replace('/', '-')) ~ '-' ~ n: target}) -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ ns.items }}

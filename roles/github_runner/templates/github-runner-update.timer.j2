@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily update of the GitHub Actions runner images
+
+[Timer]
+OnCalendar={{ github_runner_update_schedule }}
+# Catch up after the machine was off at the scheduled time.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

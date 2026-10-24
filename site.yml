@@ -20,3 +20,5 @@
       when: coolify_dashboard == 'tailscale'
     - cloudflare_tunnel
     - preview_cleanup
+    # Stops the runners when github_runner_enabled is false.
+    - github_runner

@@ -1,0 +1,15 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# Every runner, its Docker daemon and the containers its jobs start share these
+# limits, so jobs cannot take the CPU or memory the previews need. Under
+# contention the runners also get half the CPU and disk weight of other work.
+[Unit]
+Description=GitHub Actions runners and their jobs
+
+[Slice]
+CPUQuota={{ github_runner_cpu_quota }}
+CPUWeight=50
+IOWeight=50
+MemoryMax={{ github_runner_memory_max }}
+MemorySwapMax=0
+TasksMax={{ github_runner_tasks_max }}

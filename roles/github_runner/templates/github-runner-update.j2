@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Managed by Ansible (preview-infra). Pulls the runner images again, so the next
+# jobs get GitHub's current runner, and removes the versions they replaced once
+# no container uses them. Other images are left alone.
+set -euo pipefail
+
+{% set images = [github_runner_image] + ([github_runner_dind_image] if github_runner_docker else []) %}
+{% for image in images %}
+docker pull --quiet {{ image | quote }} >/dev/null
+{% endfor %}
+
+# A replaced version loses its tag but keeps its repository digest.
+for id in $(docker images --quiet --filter dangling=true | sort -u); do
+  digests=$(docker image inspect --format '{% raw %}{{ range .RepoDigests }}{{ println . }}{{ end }}{% endraw %}' "$id")
+  grep -q{% for image in images %} -e {{ ('^' ~ (image | regex_replace(':[^:/]*$', '')) ~ '@') | quote }}{% endfor %} <<<"$digests" || continue
+  if docker image rm "$id" >/dev/null 2>&1; then
+    echo "Removed $id"
+  fi
+done
