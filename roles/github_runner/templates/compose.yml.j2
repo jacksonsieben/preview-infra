@@ -27,6 +27,7 @@ services:
 {% if github_runner_docker %}
       - externals:/home/runner/externals
       - dind-sock:/run/dind
+      - tmp:/tmp
 {% endif %}
     cgroup_parent: {{ github_runner_slice }}
 {% if github_runner_docker %}
@@ -46,10 +47,12 @@ services:
     volumes:
       - docker-data:/var/lib/docker
       - dind-sock:/run/dind
-      # Same paths as in the runner: job and service containers mount them.
+      # Same paths as in the runner: job and service containers mount them,
+      # and jobs mount files they write to /tmp (docker run -v /tmp/x:/x).
       - ${RUNNER_WORK:?}:/home/runner/_work
       - ${RUNNER_TOOL_CACHE_DIR:?}:/opt/hostedtoolcache
       - externals:/home/runner/externals
+      - tmp:/tmp
     cgroup_parent: {{ github_runner_slice }}
     depends_on:
       - runner
@@ -58,4 +61,5 @@ volumes:
   docker-data:
   dind-sock:
   externals:
+  tmp:
 {% endif %}
