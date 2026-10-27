@@ -593,6 +593,15 @@ when the job ends.
   container labels with the application. After changing a domain, use
   *Container labels → Reset To Defaults* (or save from the General page) and
   redeploy.
+- **Deploy fails in `git clone` with `curl 92 HTTP/2 stream ... CANCEL`**
+  (then `early EOF`, `invalid index-pack output`). The host's link to GitHub
+  is failing, not the build: Coolify clones before building and does not
+  retry. If the self-hosted runner's checkouts fail with the same error at the
+  same time, it is the network. Check it from the host with
+  `time git ls-remote https://github.com/<owner>/<repo>.git`, then redeploy
+  once that answers in a second or two. A repository whose tip carries large
+  binaries (screenshots, for one) needs a faster link: even a
+  `--depth=1` clone downloads all of them.
 
 ## Why `http://` in Coolify
 
