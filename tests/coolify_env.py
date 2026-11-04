@@ -114,6 +114,9 @@ class FakeCoolify:
             if method == "GET":
                 return 200, app
             if method == "PATCH":
+                # Like Coolify, keeps these under the application's settings.
+                for key in [k for k in body if k.startswith("is_") and k.endswith("_enabled")]:
+                    app.setdefault("settings", {})[key] = body.pop(key)
                 app.update(body)
                 return 200, {"uuid": app["uuid"]}
         if parts[2:] == ["start"] and method == "POST":
@@ -335,6 +338,31 @@ def main():
         print("# 7. an app that sets some is not in Coolify")
         rc, out = run([site()], [dict(not_yet, preview_env={"X": "1"})])
         check(rc != 0 and "no single application for you/notyet" in out, "the run stops and says so", out)
+
+        print("# 8. previews on demand, on an app made by hand")
+        before = len(api.requests)
+        rc, out = run([site()], [preview_app()])
+        check(rc == 0 and "PATCH" not in [r[0] for r in api.requests[before:] if r[1] == f"/applications/{myapp}"],
+              "without `previews`, Coolify's setting is left alone", out)
+        before = len(api.requests)
+        rc, out = run([site()], [preview_app(previews=False)])
+        app = next(a for a in api.apps if a["uuid"] == myapp)
+        check(rc == 0 and app["settings"]["is_preview_deployments_enabled"] is False,
+              "`previews: false` turns automatic previews off", out)
+        check(("POST", f"/applications/{myapp}/start", TOKEN) not in api.requests[before:],
+              "and deploys nothing")
+        before = len(api.requests)
+        rc, out = run([site()], [preview_app(previews=False)])
+        check(rc == 0 and not [r for r in api.requests[before:] if r[0] != "GET"], "a second run writes nothing", out)
+
+        print("# 9. previews on demand, on an app the role manages")
+        before = len(api.requests)
+        rc, out = run([site(previews=False)], [preview_app()])
+        siteapp_now = next(a for a in api.apps if a["git_repository"] == "you/site")
+        check(rc == 0 and siteapp_now["settings"]["is_preview_deployments_enabled"] is False,
+              "`previews: false` turns automatic previews off", out)
+        check(not [r for r in api.requests[before:] if r[0] == "POST" and r[1].endswith("/start")],
+              "and deploys nothing")
 
     server.shutdown()
     print(f"\n{len(FAILED)} failed" if FAILED else "\nall passed")

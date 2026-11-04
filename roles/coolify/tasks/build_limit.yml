@@ -1,0 +1,33 @@
+---
+# How many builds Coolify runs at once on this host. It keeps the rest in its
+# queue. The setting lives in Coolify's database, so it goes through tinker,
+# which also works on a first run, before the API has a token.
+
+- name: Check the build limit
+  ansible.builtin.assert:
+    that: coolify_concurrent_builds | int >= 1
+    fail_msg: coolify_concurrent_builds must be a whole number, 1 or more.
+    quiet: true
+
+- name: Limit how many builds run at once
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        $s = App\Models\Server::find(0)->settings;
+        if ((int) $s->concurrent_builds === {{ coolify_concurrent_builds | int }}) { echo 'ok'; } else {
+          $s->concurrent_builds = {{ coolify_concurrent_builds | int }};
+          $s->save();
+          echo 'changed';
+        }
+  register: coolify_build_limit
+  changed_when: "'changed' in coolify_build_limit.stdout_lines"
+  failed_when: >-
+    coolify_build_limit.rc != 0
+    or coolify_build_limit.stdout_lines | select('in', ['ok', 'changed']) | list | length == 0

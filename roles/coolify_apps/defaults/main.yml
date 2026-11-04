@@ -12,6 +12,8 @@ coolify_app_defaults:
   port: 8080
   domains: []
   auto_deploy: true
+  # false builds a preview only when asked for in the dashboard (README, Build
+  # load), not on every push.
   previews: true
   # Preview hostname: pr-<n>-<preview_name>.<domain>. Give each app its own
   # name, since PR numbers repeat across repositories.

@@ -35,6 +35,8 @@ jobs:
         run: ansible-playbook tests/tunnel_routes.yml
       - name: Coolify environment variables
         run: python3 tests/coolify_env.py
+      - name: Coolify build limit
+        run: ansible-playbook tests/coolify_build_limit.yml
       - name: Runner settings
         run: ansible-playbook tests/github_runner_settings.yml
       - name: Runner job script
