@@ -95,6 +95,9 @@
 
 # Before the port changes: the proxy is reconfigured through Coolify, which
 # reaches this host over SSH (on a fresh host ufw drops it until then).
+- name: Limit the builds Coolify runs at once
+  ansible.builtin.include_tasks: build_limit.yml
+
 - name: Give Coolify SSH access to this host
   ansible.builtin.include_tasks: host_access.yml
 

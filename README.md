@@ -339,11 +339,55 @@ for real: the checks are `ansible-playbook site.yml --syntax-check` and
 DNS names offline and fails if production's would change, and
 `python3 tests/coolify_env.py`, which runs the `coolify_apps` role against a
 fake Coolify API and checks the environment variables.
+`ansible-playbook tests/coolify_build_limit.yml` checks the build limit task
+against a stand-in for `docker`.
 `ansible-playbook tests/github_runner_settings.yml` checks the runner instance
 names and defaults, and `python3 tests/github_runner_job.py` runs
 `github-runner-job` against a fake GitHub API. The *Checks* workflow
 (`.github/workflows/checks.yml`) runs them all on every pull request, on
 GitHub's runners.
+
+## Build load
+
+Builds are the heaviest thing on the host: one can take every CPU. Two settings
+keep them in check.
+
+**One build at a time.** `coolify_concurrent_builds` (default `1`) is the
+number of builds Coolify runs at once on this host, previews and production
+together. The others wait in its queue. It is Coolify's *Servers → your server
+→ Advanced → Concurrent Builds*, and each run of the playbook sets it back to
+this value, so change it in `local.yml`, not in the dashboard. Deployments wait
+longer when several are queued, and past *Deployment Queue Limit* (25 by
+default) Coolify refuses new ones.
+
+**Previews on demand.** With `previews: false` on an entry of `coolify_apps` or
+`preview_apps`, pushes and new PRs no longer build a preview. Production keeps
+following `auto_deploy`. On a `preview_apps` entry, leaving `previews` out keeps
+whatever Coolify has.
+
+```yaml
+preview_apps:
+  - name: myapp
+    repository: you/myapp
+    previews: false
+    # ...
+```
+
+The same switch in the dashboard, for an app you don't list or to try it first:
+the application → *Advanced* → turn off *Preview Deployments*. If `local.yml`
+sets `previews`, the next run puts that value back.
+
+To get a preview of a PR:
+
+1. Open the application → *Preview Deployments*.
+2. *Load Pull Requests* (needs a GitHub App source), then *Configure* on the PR.
+3. *Deploy*. The address follows the *Preview URL Template*, as before.
+
+After that:
+
+- A new push does not update the preview: press *Redeploy* on it.
+- Closing or merging the PR still removes the preview.
+- The preview's address is listed on that page.
 
 ## Security
 
@@ -620,7 +664,7 @@ site.yml                         playbook: coolify, tailscale_dashboard, cloudfl
 inventory/hosts.yml              which machine is the preview host
 group_vars/all/defaults.yml      every setting and its default
 group_vars/all/local.yml         your settings (not in git; template: local.example.yml)
-roles/coolify/                   runs Coolify's installer once, binds its ports to loopback
+roles/coolify/                   runs Coolify's installer once, binds its ports to loopback, limits concurrent builds
 roles/tailscale_dashboard/       dashboard on the tailnet with Tailscale Serve
 roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in Docker,
                                  Cloudflare Access for the other zones (tasks/access.yml)
@@ -630,6 +674,7 @@ roles/coolify_apps/              the applications in coolify_apps, through Cooli
 roles/github_runner/             optional GitHub Actions runners for private repositories, one container per job
 tests/tunnel_routes.yml          offline check of the tunnel routes and DNS names
 tests/coolify_env.py             the coolify_apps role against a fake Coolify API
+tests/coolify_build_limit.yml    offline check of the build limit task
 tests/github_runner_settings.yml offline check of the runner instance names and defaults
 tests/github_runner_job.py       github-runner-job against a fake GitHub API
 .github/workflows/checks.yml     the syntax check and the tests above, on every pull request

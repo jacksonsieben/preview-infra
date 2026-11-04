@@ -34,6 +34,10 @@ coolify_apps:
     #   SITE_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'Site preview code', field='credential', vault='Ansible') }}"
     # production_env: {}   # only in production, same format
 
+# Builds at once on this host (default 1). To build one app's previews only on
+# demand, add `previews: false` to its entry (README, Build load).
+# coolify_concurrent_builds: 1
+
 # The apex is not covered by the wildcard: list it to route it here too. Its
 # DNS record is replaced with one pointing at the tunnel.
 # production_hostnames: ["{{ domain }}"]

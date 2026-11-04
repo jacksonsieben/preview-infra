@@ -1,0 +1,115 @@
+---
+# The build limit task against a stand-in for `docker exec coolify ... tinker`.
+# Offline: nothing outside a temporary directory is called or changed.
+#
+#   ansible-playbook tests/coolify_build_limit.yml
+
+- name: Coolify build limit
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    limit_tasks: "{{ playbook_dir }}/../roles/coolify/tasks/build_limit.yml"
+  tasks:
+    - name: Read the defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all/defaults.yml"
+
+    - name: Check that the default is one build at a time
+      ansible.builtin.assert:
+        that: coolify_concurrent_builds == 1
+        quiet: true
+
+    - name: Make a temporary directory
+      ansible.builtin.tempfile:
+        state: directory
+      register: fake_dir
+
+    - name: Write the stand-in for docker
+      ansible.builtin.copy:
+        dest: "{{ fake_dir.path }}/docker"
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          printf '%s\n' "$*" > "{{ fake_dir.path }}/call"
+          cat "{{ fake_dir.path }}/answer"
+
+    - name: Run the task against the stand-in
+      environment:
+        PATH: "{{ fake_dir.path }}:{{ lookup('ansible.builtin.env', 'PATH') }}"
+      block:
+        - name: "Answer for: Already at the limit"
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/answer"
+            content: "ok\n"
+
+        - name: Already at the limit
+          ansible.builtin.include_tasks: "{{ limit_tasks }}"
+          vars:
+            coolify_concurrent_builds: 3
+
+        - name: Check that nothing is reported as changed, and the value sent
+          ansible.builtin.assert:
+            that:
+              - coolify_build_limit is not changed
+              - "'concurrent_builds = 3;' in lookup('ansible.builtin.file', fake_dir.path ~ '/call')"
+            quiet: true
+
+        - name: "Answer for: A different limit"
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/answer"
+            content: "changed\n"
+
+        - name: A different limit
+          ansible.builtin.include_tasks: "{{ limit_tasks }}"
+
+        - name: Check that the change is reported
+          ansible.builtin.assert:
+            that: coolify_build_limit is changed
+            quiet: true
+
+        - name: Tinker prints an error instead
+          block:
+            - name: "Answer for: Run with an unexpected answer"
+              ansible.builtin.copy:
+                dest: "{{ fake_dir.path }}/answer"
+                content: "Error: changed nothing\n"
+
+            - name: Run with an unexpected answer
+              ansible.builtin.include_tasks: "{{ limit_tasks }}"
+            - name: Fail if it was accepted
+              ansible.builtin.set_fact:
+                limit_error_accepted: true
+          rescue:
+            - name: Note that it stopped
+              ansible.builtin.debug:
+                msg: An unexpected answer stops the run.
+
+        - name: An invalid limit
+          block:
+            - name: "Answer for: Run with zero builds"
+              ansible.builtin.copy:
+                dest: "{{ fake_dir.path }}/answer"
+                content: "ok\n"
+
+            - name: Run with zero builds
+              ansible.builtin.include_tasks: "{{ limit_tasks }}"
+              vars:
+                coolify_concurrent_builds: 0
+            - name: Fail if it was accepted
+              ansible.builtin.set_fact:
+                limit_error_accepted: true
+          rescue:
+            - name: Note that it stopped
+              ansible.builtin.debug:
+                msg: A limit of zero stops the run.
+
+        - name: Check that both errors stopped the run
+          ansible.builtin.assert:
+            that: not (limit_error_accepted | default(false))
+            quiet: true
+      always:
+        - name: Remove the temporary directory
+          ansible.builtin.file:
+            path: "{{ fake_dir.path }}"
+            state: absent

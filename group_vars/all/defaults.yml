@@ -39,11 +39,17 @@ production_hostnames: []
 #       domains: ["{{ domain }}", "www.{{ domain }}"]   # served as http:// (see README)
 #       port: 8080
 #       preview_name: preview   # previews at pr-<n>-preview.<domain>
+#       previews: true          # false: on demand only (README, Build load)
 #       preview_env: {}         # optional, see "Environment variables" below
 #       production_env: {}
 # ---------------------------------------------------------------------------
 coolify_github_app: ""
 coolify_apps: []
+
+# How many builds Coolify runs at once on this host, previews and production
+# together. The others wait in its queue. A build can use every CPU, so more
+# than one at a time slows the whole machine.
+coolify_concurrent_builds: 1
 
 # Where the Coolify dashboard is reachable:
 #   tailscale  only from your tailnet, at https://<machine>.<tailnet>.ts.net.
@@ -97,6 +103,8 @@ preview_access_session_duration: 24h
 #       data_path: /data               # optional: a volume, emptied per preview
 #       preview_name: ""               # optional: pr-12-<preview_name>.<zone>,
 #                                      # main-<preview_name>.<zone> for `main`
+#       previews: false                # optional: on demand only (README, Build
+#                                      # load). Left out, Coolify's setting stays.
 #       preview_env: {}                # optional, see "Environment variables" below
 #       production_env: {}
 #

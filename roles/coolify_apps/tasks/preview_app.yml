@@ -1,6 +1,7 @@
 ---
 # One entry of preview_apps. The application itself is made by hand in Coolify
-# (README, More zones and apps); only its environment variables are set here.
+# (README, More zones and apps); only its environment variables, and `previews`
+# when given, are set here.
 # It is found by its repository, and by `name` when the repository has several.
 
 - name: "Find the application for {{ coolify_app_item.repository }}"
@@ -36,3 +37,32 @@
     coolify_env_app_uuid: "{{ coolify_preview_matches[0].uuid }}"
     coolify_env_label: "{{ coolify_app_item.name }}"
   when: coolify_preview_matches | length == 1
+
+# Takes effect on the next pull request event, so it deploys nothing.
+- name: "Read the preview setting of {{ coolify_app_item.repository }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/applications/{{ coolify_preview_matches[0].uuid }}"
+    headers: &coolify_headers
+      Authorization: "Bearer {{ coolify_api_session.token }}"
+      Accept: application/json
+  register: coolify_preview_current
+  when:
+    - coolify_app_item.previews is defined
+    - coolify_preview_matches | length == 1
+
+- name: "Set the preview setting of {{ coolify_app_item.repository }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/applications/{{ coolify_preview_matches[0].uuid }}"
+    method: PATCH
+    headers: *coolify_headers
+    body_format: json
+    body:
+      is_preview_deployments_enabled: "{{ coolify_app_item.previews | bool }}"
+  changed_when: true
+  when:
+    - coolify_preview_current is not skipped
+    - >-
+      (coolify_preview_current.json.settings | default({}, true)).is_preview_deployments_enabled
+      | default(none) is none
+      or (coolify_preview_current.json.settings.is_preview_deployments_enabled | bool)
+      != (coolify_app_item.previews | bool)

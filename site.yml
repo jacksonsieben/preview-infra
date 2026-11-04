@@ -73,7 +73,7 @@
           - "Domains: http://{{ 'main' ~ suffix }}.{{ item.zone }}"
           - "Health check: on, path {{ item.healthcheck_path }}, port {{ item.port }}"
           - "Persistent storage: {{ ('volume mounted at ' ~ item.data_path) if item.data_path | default('') else 'none' }}"
-          - "Preview Deployments and Auto Deploy: on"
+          - "Preview Deployments: {{ 'on' if item.previews | default(true) | bool else 'off (on demand, README: Build load)' }}. Auto Deploy: on"
           - "Preview URL Template: pr-{% raw %}{{pr_id}}{% endraw %}{{ suffix }}.{{ item.zone }}"
           - "Environment variables: none by hand; the playbook sets preview_env and production_env"
       vars:
