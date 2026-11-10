@@ -1,0 +1,34 @@
+---
+# The settings you would change are in group_vars/all/defaults.yml, section
+# "Remote host". These follow from the machine and from Tailscale.
+
+ci_host_tailnet_interface: tailscale0
+# Every Tailscale address is in one of these (IPv4 CGNAT range, IPv6 ULA).
+ci_host_tailnet_cidrs: [100.64.0.0/10, fd7a:115c:a1e0::/48]
+
+# The interface with the public address: ports published by containers are
+# dropped when they arrive on it.
+ci_host_public_interface: "{{ ansible_facts.default_ipv4.interface }}"
+
+# Oracle's Ubuntu images restore these iptables rules at boot. ufw replaces
+# them; the rules that limit who may reach Oracle's instance services
+# (InstanceServices) are kept.
+ci_host_oracle_rules: /etc/iptables/rules.v4
+ci_host_oracle_rules6: /etc/iptables/rules.v6
+
+# Oracle's InstanceServices rules, read from its file, as lines of ufw's
+# after.rules: the chain, its rules, and the jump to it from OUTPUT, moved to
+# ufw-after-output. Empty on a host without Oracle's file.
+ci_host_instance_services: >-
+  {{ [] if ci_host_oracle_rules_read is not defined or ci_host_oracle_rules_read is skipped
+     else (ci_host_oracle_rules_read.content | b64decode).splitlines()
+     | select('match', '^(:InstanceServices |-A InstanceServices |-A OUTPUT .*-j InstanceServices$)')
+     | map('regex_replace', '^-A OUTPUT ', '-A ufw-after-output ')
+     | list }}
+
+ci_host_swap_file: /swapfile
+
+# memory-floor wakes up this often (seconds) and holds memory in chunks of
+# this size (MiB).
+ci_host_memory_floor_interval: 10
+ci_host_memory_floor_chunk_mb: 64

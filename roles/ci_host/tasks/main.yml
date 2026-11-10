@@ -1,0 +1,77 @@
+---
+# The base of the remote host (README, Remote host (ci-1)): nothing reachable
+# but through the tailnet, security updates, swap, and never idle for Oracle.
+#
+# The firewall and sshd accept the tailnet only, so the first tasks make sure
+# this very connection came through it: applied over any other path, the next
+# connection would be refused.
+
+- name: Read the state of Tailscale
+  ansible.builtin.command: tailscale status --json --peers=false
+  register: ci_host_tailscale
+  changed_when: false
+
+- name: Read the host's tailnet addresses
+  ansible.builtin.command: tailscale ip
+  register: ci_host_tailnet_ips
+  changed_when: false
+
+- name: Read the addresses of this SSH connection
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import ipaddress, json, os, sys
+        parts = os.environ.get("SSH_CONNECTION", "").split()
+        client, server = (parts[0], parts[2]) if len(parts) == 4 else ("", "")
+        def tailnet(address):
+            try:
+                ip = ipaddress.ip_address(address)
+            except ValueError:
+                return False
+            return any(ip in ipaddress.ip_network(n) for n in sys.argv[1:])
+        print(json.dumps({"client": client, "server": server,
+                          "client_in_tailnet": tailnet(client)}))
+      - "{{ ci_host_tailnet_cidrs[0] }}"
+      - "{{ ci_host_tailnet_cidrs[1] }}"
+  # sudo would drop SSH_CONNECTION from the environment.
+  become: false
+  register: ci_host_ssh
+  changed_when: false
+
+- name: Check that the playbook reaches the host through the tailnet
+  ansible.builtin.assert:
+    that:
+      - (ci_host_tailscale.stdout | from_json).BackendState == 'Running'
+      - ci_host_tailnet_interface in ansible_facts.interfaces
+      - (ci_host_ssh.stdout | from_json).server in ci_host_tailnet_ips.stdout_lines
+      - (ci_host_ssh.stdout | from_json).client_in_tailnet
+    fail_msg: >-
+      Connect to {{ inventory_hostname }} through the tailnet: set
+      ci_host_address to its Tailscale address or MagicDNS name
+      ({{ ci_host_tailnet_ips.stdout_lines | join(', ') }}) and run the
+      playbook from a machine on the tailnet. This connection:
+      {{ ci_host_ssh.stdout }}. The firewall and sshd set up next would
+      refuse any other path (README, Remote host (ci-1)).
+    quiet: true
+
+- name: Keep Tailscale on at boot
+  ansible.builtin.systemd_service:
+    name: tailscaled
+    enabled: true
+
+- name: Firewall
+  ansible.builtin.import_tasks: firewall.yml
+
+- name: SSH
+  ansible.builtin.import_tasks: sshd.yml
+
+- name: Security updates
+  ansible.builtin.import_tasks: updates.yml
+
+- name: Swap
+  ansible.builtin.import_tasks: swap.yml
+
+- name: Memory floor
+  ansible.builtin.import_tasks: memory_floor.yml

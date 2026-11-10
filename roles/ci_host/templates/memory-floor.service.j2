@@ -1,0 +1,44 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# Keeps the memory in use at {{ ci_host_memory_floor_percent }}% so Oracle
+# never sees the host idle (README, Remote host (ci-1)).
+[Unit]
+Description=Keep memory use above {{ ci_host_memory_floor_percent }}%
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/memory-floor
+EnvironmentFile=/etc/memory-floor.env
+Environment=MEMORY_FLOOR_TARGET_PERCENT={{ ci_host_memory_floor_percent }}
+Environment=MEMORY_FLOOR_ALERT_PERCENT={{ ci_host_memory_alert_percent }}
+Environment=MEMORY_FLOOR_ALERT_AFTER={{ ci_host_memory_alert_after }}
+Environment=MEMORY_FLOOR_INTERVAL={{ ci_host_memory_floor_interval }}
+Environment=MEMORY_FLOOR_CHUNK_MB={{ ci_host_memory_floor_chunk_mb }}
+Environment=MEMORY_FLOOR_HOST={{ inventory_hostname }}
+Restart=always
+RestartSec=30
+
+# The memory it holds is locked, so it is never swapped out (swapped, it would
+# not count as used), and it is the first process the kernel kills when the
+# memory runs out.
+LimitMEMLOCK=infinity
+OOMScoreAdjust=1000
+# It sleeps between checks; never let it compete with real work.
+Nice=19
+CPUQuota=10%
+
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

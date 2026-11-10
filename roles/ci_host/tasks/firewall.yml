@@ -1,0 +1,117 @@
+---
+# Incoming: everything through the tailnet, nothing else. Outgoing: free.
+#
+# Oracle's Ubuntu images ship their own iptables rules, restored at boot by
+# iptables-persistent: port 22 from anywhere, the rest rejected, and an
+# InstanceServices chain that lets only root reach the instance's storage
+# endpoints. ufw takes over (iptables-persistent and ufw do not install
+# together); the InstanceServices rules are carried into ufw's own files.
+
+- name: Find Oracle's iptables rules
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ ci_host_oracle_rules }}"
+    # Where the last task of this file moves them.
+    - "{{ ci_host_oracle_rules }}.before-ufw"
+  register: ci_host_oracle_rules_found
+
+- name: Read Oracle's iptables rules
+  ansible.builtin.slurp:
+    src: "{{ (ci_host_oracle_rules_found.results | selectattr('stat.exists') | first).item }}"
+  register: ci_host_oracle_rules_read
+  when: ci_host_oracle_rules_found.results | selectattr('stat.exists') | list | length > 0
+
+- name: Stop restoring Oracle's iptables rules at boot
+  ansible.builtin.apt:
+    name: [iptables-persistent, netfilter-persistent]
+    state: absent
+
+- name: Install ufw
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Kept in ufw's after.rules, which ufw loads on every start and reload. The
+# jump moves from OUTPUT to ufw-after-output, a chain ufw empties and refills
+# itself, so a reload never adds it twice. It comes before ufw accepts new
+# outgoing connections.
+- name: Keep Oracle's rules for its instance services
+  ansible.builtin.blockinfile:
+    path: /etc/ufw/after.rules
+    marker: "# {mark} preview-infra: Oracle instance services"
+    insertafter: EOF
+    block: |
+      *filter
+      {{ ci_host_instance_services | join('\n') }}
+      COMMIT
+    state: "{{ 'present' if ci_host_instance_services else 'absent' }}"
+  notify: Reload ufw
+
+# Docker publishes a container's ports with its own iptables rules, ahead of
+# ufw's: `-p 8080:80` answers on the public address whatever ufw says. Docker
+# sends that traffic through DOCKER-USER first and leaves the chain to us, so
+# drop there what arrives on the public interface, except replies to the
+# containers' own connections. Through the tailnet and on 127.0.0.1 published
+# ports keep working. Declaring the chain empties it on every reload.
+- name: Keep ports published by containers off the public interface
+  ansible.builtin.blockinfile:
+    path: "/etc/ufw/{{ item }}"
+    marker: "# {mark} preview-infra: containers only through the tailnet"
+    insertafter: EOF
+    block: |
+      *filter
+      :DOCKER-USER - [0:0]
+      -A DOCKER-USER -i {{ ci_host_public_interface }} -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+      -A DOCKER-USER -i {{ ci_host_public_interface }} -j DROP
+      COMMIT
+  loop: [after.rules, after6.rules]
+  notify: Reload ufw
+
+# SSH included: sshd itself also accepts only tailnet addresses (sshd.yml).
+- name: Accept everything that arrives through the tailnet
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: "{{ ci_host_tailnet_interface }}"
+    comment: tailnet
+
+- name: Deny incoming and routed traffic by default, allow outgoing
+  community.general.ufw:
+    default: "{{ item.policy }}"
+    direction: "{{ item.direction }}"
+  loop:
+    - { direction: incoming, policy: deny }
+    - { direction: outgoing, policy: allow }
+    - { direction: routed, policy: deny }
+
+- name: Turn ufw on
+  community.general.ufw:
+    state: enabled
+
+# The rules iptables-persistent loaded at boot are still there until the next
+# boot, ahead of ufw's: Oracle's REJECT would hide ufw's rules and its port 22
+# rule would still accept. Remove them now, last first (the REJECT comes after
+# what it guards), then move the file aside so this runs once.
+- name: Remove Oracle's iptables rules from the running firewall
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      for pair in "iptables {{ ci_host_oracle_rules }}" "ip6tables {{ ci_host_oracle_rules6 }}"; do
+        tool=${pair%% *} file=${pair#* }
+        [ -f "$file" ] || continue
+        grep -E '^-A (INPUT|FORWARD|OUTPUT) ' "$file" | tac | while read -r rule; do
+          # Unquoted on purpose: one argument per word, as in the file.
+          if $tool -C ${rule#-A } 2>/dev/null; then
+            $tool -D ${rule#-A }
+            echo "removed: $tool $rule"
+          fi
+        done
+        mv "$file" "$file.before-ufw"
+        echo "moved: $file to $file.before-ufw"
+      done
+    executable: /bin/bash
+  register: ci_host_oracle_rules_removed
+  changed_when: ci_host_oracle_rules_removed.stdout | length > 0

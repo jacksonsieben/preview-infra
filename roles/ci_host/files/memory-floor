@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Keep the memory in use above a floor, so Oracle never sees the host idle.
+
+Oracle reclaims an Always Free instance when, over 7 days, the 95th percentile
+of its CPU, network and memory use are all below 20%. This holds just enough
+memory to bring the host's use (MemTotal - MemAvailable) up to
+MEMORY_FLOOR_TARGET_PERCENT, in chunks, and gives it back as soon as the real
+load uses that memory itself. It wakes every MEMORY_FLOOR_INTERVAL seconds,
+reads /proc/meminfo and otherwise sleeps.
+
+The memory is locked (mlock), so the kernel never swaps it out: swapped, it
+would stop counting as used. It is released by this process, not by the
+kernel, so a build that grows faster than one interval can briefly push the
+host into swap; the systemd unit gives this process the highest OOM score, so
+it is the first to go if memory runs out.
+
+When the use stays below MEMORY_FLOOR_ALERT_PERCENT for
+MEMORY_FLOOR_ALERT_AFTER seconds anyway, it posts to MEMORY_FLOOR_NTFY_URL
+(an ntfy topic URL; empty logs only).
+"""
+import ctypes
+import math
+import mmap
+import os
+import signal
+import socket
+import sys
+import time
+import urllib.request
+
+PAGE = mmap.PAGESIZE
+MIB = 1024 * 1024
+
+
+def read_meminfo(path="/proc/meminfo"):
+    """MemTotal and MemAvailable, in bytes."""
+    values = {}
+    with open(path) as f:
+        for line in f:
+            key, _, rest = line.partition(":")
+            if key in ("MemTotal", "MemAvailable"):
+                values[key] = int(rest.split()[0]) * 1024
+    return values["MemTotal"], values["MemAvailable"]
+
+
+def used_percent(total, available):
+    return (total - available) * 100 / total
+
+
+def plan(total, available, held, chunk, target_percent):
+    """How many chunks to hold, given that `held` chunks are held now.
+
+    The rest of the host uses total - available - held * chunk. The memory
+    missing to reach the target, in chunks, is usually a fraction: anything
+    between its floor and its ceiling is close enough, so the count only
+    changes once the gap moves by a whole chunk. That keeps small swings of
+    the real load from allocating and freeing a chunk on every wake-up.
+    """
+    others = max(0, total - available - held * chunk)
+    missing = total * target_percent / 100 - others
+    if missing <= 0:
+        return 0
+    low, high = math.floor(missing / chunk), math.ceil(missing / chunk)
+    return min(max(held, low), high)
+
+
+class Alarm:
+    """Says when to warn: memory use below the limit for `after` seconds.
+
+    Once per episode; a new one starts after the use goes back above the
+    limit. A warning that could not be sent is tried again `retry` seconds
+    later.
+    """
+
+    def __init__(self, limit_percent, after, retry=300):
+        self.limit = limit_percent
+        self.after = after
+        self.retry = retry
+        self.low_since = None
+        self.sent = False
+        self.next_try = 0
+
+    def update(self, now, percent):
+        if percent >= self.limit:
+            self.low_since, self.sent, self.next_try = None, False, 0
+            return False
+        if self.low_since is None:
+            self.low_since = now
+        return (not self.sent and now - self.low_since >= self.after
+                and now >= self.next_try)
+
+    def done(self, now, ok):
+        if ok:
+            self.sent = True
+        else:
+            self.next_try = now + self.retry
+
+
+def notify(url, title, message, timeout=10):
+    """Posts to an ntfy topic URL. Returns whether it was accepted."""
+    request = urllib.request.Request(
+        url, data=message.encode(), method="POST",
+        headers={"Title": title, "Priority": "high", "Tags": "warning"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    # The URL holds the secret topic: log the kind of error only.
+    except (OSError, ValueError) as e:
+        log(f"ntfy: {e.__class__.__name__}")
+        return False
+
+
+def log(message):
+    print(message, flush=True)
+
+
+class Ballast:
+    """Locked, touched memory, held in chunks of equal size."""
+
+    _libc = ctypes.CDLL(None, use_errno=True)
+
+    def __init__(self, chunk):
+        self.chunk = chunk
+        self.chunks = []
+        self.lock_failed = False
+
+    def __len__(self):
+        return len(self.chunks)
+
+    def resize(self, count):
+        while len(self.chunks) > count:
+            self.chunks.pop().close()
+        while len(self.chunks) < count:
+            self.chunks.append(self._allocate())
+
+    def _allocate(self):
+        m = mmap.mmap(-1, self.chunk, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+        # A page never written to costs nothing: write one byte in each.
+        for offset in range(0, self.chunk, PAGE):
+            m[offset] = 1
+        view = ctypes.c_char.from_buffer(m)
+        try:
+            if self._libc.mlock(ctypes.c_void_p(ctypes.addressof(view)),
+                                ctypes.c_size_t(self.chunk)) != 0:
+                if not self.lock_failed:
+                    log("mlock failed (errno %d): the memory may be swapped out"
+                        % ctypes.get_errno())
+                self.lock_failed = True
+        finally:
+            del view
+        return m
+
+
+def settings(env):
+    return {
+        "target": float(env.get("MEMORY_FLOOR_TARGET_PERCENT", "30")),
+        "alert": float(env.get("MEMORY_FLOOR_ALERT_PERCENT", "20")),
+        "after": float(env.get("MEMORY_FLOOR_ALERT_AFTER", "3600")),
+        "interval": float(env.get("MEMORY_FLOOR_INTERVAL", "10")),
+        "chunk": int(float(env.get("MEMORY_FLOOR_CHUNK_MB", "64")) * MIB),
+        "ntfy_url": env.get("MEMORY_FLOOR_NTFY_URL", ""),
+        "host": env.get("MEMORY_FLOOR_HOST", "") or socket.gethostname(),
+        "meminfo": env.get("MEMORY_FLOOR_MEMINFO", "/proc/meminfo"),
+    }
+
+
+class Keeper:
+    def __init__(self, conf, send=notify):
+        self.conf = conf
+        self.send = send
+        self.ballast = Ballast(conf["chunk"])
+        self.alarm = Alarm(conf["alert"], conf["after"])
+
+    def step(self, now):
+        conf = self.conf
+        total, available = read_meminfo(conf["meminfo"])
+        percent = used_percent(total, available)
+        if self.alarm.update(now, percent):
+            ok = True
+            if conf["ntfy_url"]:
+                ok = self.send(
+                    conf["ntfy_url"],
+                    f"{conf['host']}: memory use below {conf['alert']:g}%",
+                    f"Memory use on {conf['host']} has been below "
+                    f"{conf['alert']:g}% for over {conf['after'] / 3600:g} h "
+                    f"({percent:.0f}% now), memory-floor included. Oracle "
+                    "reclaims an idle Always Free instance after 7 days: "
+                    "check `systemctl status memory-floor`.")
+            log(f"memory use {percent:.0f}% below {conf['alert']:g}% for "
+                f"{conf['after']:g} s" + ("" if conf["ntfy_url"] else
+                                         " (no ntfy topic set)"))
+            self.alarm.done(now, ok)
+        held = len(self.ballast)
+        wanted = plan(total, available, held, conf["chunk"], conf["target"])
+        if wanted != held:
+            self.ballast.resize(wanted)
+            log(f"use {percent:.0f}% of {total / MIB / 1024:.1f} GiB: "
+                f"holding {wanted * conf['chunk'] // MIB} MiB "
+                f"(was {held * conf['chunk'] // MIB})")
+        return wanted
+
+
+def main():
+    conf = settings(os.environ)
+    keeper = Keeper(conf)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    log(f"target {conf['target']:g}%, alert below {conf['alert']:g}% for "
+        f"{conf['after']:g} s, chunks of {conf['chunk'] // MIB} MiB")
+    while True:
+        keeper.step(time.monotonic())
+        time.sleep(conf["interval"])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -42,6 +42,9 @@ your daily desktop. The preview links work only while the host is on.
 
 Edit `inventory/hosts.yml`: `ansible_connection: local` to run on the machine
 you are sitting at, or `ansible_host`/`ansible_user` for a machine over SSH.
+The `ci` group is a separate remote host, reached only through the tailnet
+([Remote host (ci-1)](#remote-host-ci-1)); it is skipped until you give it an
+address.
 
 ## Step 2 — Your settings and secrets
 
@@ -610,6 +613,146 @@ when the job ends.
 - Jobs reach the network like any machine on the LAN. Coolify's ports are on
   127.0.0.1 and not reachable from the jobs.
 
+## Remote host (ci-1)
+
+`ci-1` is an Oracle Cloud Always Free machine (ARM, 2 OCPU, 12 GB, 200 GB
+disk, Ubuntu 24.04, user `ubuntu`) that will take the previews and their
+builds off the laptop. For now the playbook sets up its base, the `ci_host`
+role: reachable only through the tailnet, security updates, swap, and never
+idle in Oracle's eyes. Coolify on it comes later.
+
+### What is open
+
+**Nothing on the internet.** Three locks, each enough on its own for SSH:
+
+- **Oracle's security list** has no TCP port open, ICMP only (set by hand in
+  the Oracle console, not by the playbook).
+- **ufw on the host** denies every incoming connection and accepts everything
+  that arrives on `tailscale0`. Outgoing is free. ufw's own defaults also let
+  in replies to the host's connections, DHCP and ping.
+- **sshd** takes keys only, never root, and only from tailnet addresses
+  (`AllowUsers *@100.64.0.0/10 *@fd7a:115c:a1e0::/48`, in
+  `/etc/ssh/sshd_config.d/00-preview-infra.conf`). It still listens on every
+  address: bound to the Tailscale one, it would fail when it starts before
+  `tailscaled` at boot, and lock the host.
+
+Whoever is on your tailnet reaches every port of `ci-1`; narrow that with
+Tailscale's access controls if others share the tailnet.
+
+**Docker ignores ufw.** A container published with `-p 8080:80` answers on the
+public address whatever ufw says, because Docker's rules come first. The
+playbook adds two rules to `DOCKER-USER`, the chain Docker leaves to us (in
+`/etc/ufw/after.rules`, so ufw restores them): new connections that arrive on
+the public interface (`ens3`) toward a container are dropped. Through the
+tailnet and on 127.0.0.1, published ports keep working. Still, publish on
+`127.0.0.1:` or the tailnet address, never on all addresses.
+
+**Oracle's own iptables rules** (port 22 from anywhere, the rest rejected,
+restored at boot by `iptables-persistent`) are replaced by ufw. Their
+`InstanceServices` chain, which lets only root reach the instance's storage
+endpoints, is kept in `/etc/ufw/after.rules`. The original file stays at
+`/etc/iptables/rules.v4.before-ufw`.
+
+### Set it up
+
+1. `ci-1` is on the tailnet (`sudo tailscale up`) and `ssh ubuntu@ci-1` works
+   from your machine through it.
+2. **Give `ubuntu` a password for the console** before anything else:
+   `sudo passwd ubuntu`, and keep it in 1Password. SSH never accepts it; it
+   is what lets you in through Oracle's console when the tailnet is down
+   ([below](#when-the-tailnet-is-down)).
+3. In `group_vars/all/local.yml` (this repository is public, so neither goes
+   in git):
+
+   ```yaml
+   ci_host_address: ci-1            # its MagicDNS name or Tailscale address
+   ci_host_ntfy_topic: <long random name>
+   ```
+
+   Subscribe to the same topic in the ntfy app. Whoever knows the topic can
+   read and post to it.
+4. Run the play alone (no `-K`: `ubuntu` has passwordless sudo on Oracle's
+   images):
+
+   ```bash
+   ansible-playbook site.yml --limit ci
+   ```
+
+   Its first tasks check that the playbook reached `ci-1` through the
+   tailnet; over any other path it stops before changing anything. While
+   `ci_host_address` is empty, the play skips `ci-1`.
+
+Afterwards, on `ci-1`:
+
+| Check | Expected |
+|---|---|
+| `sudo ufw status verbose` | `Default: deny (incoming), allow (outgoing), deny (routed)` and `Anywhere on tailscale0  ALLOW IN  Anywhere` |
+| `sudo sshd -T \| grep -E '^(passwordauth\|permitroot\|allowusers)'` | `passwordauthentication no`, `permitrootlogin no`, `allowusers *@100.64.0.0/10` ... |
+| `swapon --show` | `/swapfile file 4G` |
+| `journalctl -u memory-floor` | `holding <n> MiB`; `free -h` shows about 30% used |
+| `cat /etc/apt/apt.conf.d/52preview-infra-upgrades` | `Automatic-Reboot-Time "07:30"` |
+
+From outside the tailnet, `nc -vz -w 5 <public IP> 22` times out.
+
+### Updates and reboots
+
+`unattended-upgrades` installs Ubuntu's security updates every day, when
+`apt-daily-upgrade.timer` fires (06:00-07:00 by default,
+`systemctl list-timers apt-daily-upgrade.timer`). An update that needs a
+reboot (a kernel, libc) never reboots the host right away: it reboots at
+`ci_host_reboot_time`, 07:30 of the host's clock. That is UTC on Oracle's
+images, 04:30 in Brasília. `/var/run/reboot-required` exists while one is
+pending; `journalctl -u unattended-upgrades` and
+`/var/log/unattended-upgrades/` show what was installed.
+
+### Swap
+
+A 4 GB `/swapfile` (`ci_host_swap_mb`), so a build that outgrows the memory
+slows down instead of being killed.
+
+### Never idle
+
+Oracle reclaims an Always Free instance when, over 7 days, the 95th percentile
+of its CPU, its network **and** its memory use are all below 20%. Keeping one
+of the three above is enough, and memory costs nothing to keep: the
+`memory-floor` service holds memory until the host's use (`MemTotal -
+MemAvailable`) reaches `ci_host_memory_floor_percent`, 30% (about 3.6 GB of
+12). When the real load uses that much itself, it gives its memory back, in
+chunks of 64 MB, checked every 10 seconds; otherwise it sleeps. Its memory is
+locked so it is never swapped out (swapped, it would not count), and it is the
+first process the kernel kills if the memory runs out.
+
+If the use stays below 20% for an hour anyway (`ci_host_memory_alert_percent`,
+`ci_host_memory_alert_after`), it posts once to the ntfy topic, and logs it
+in `journalctl -u memory-floor`. Look at `systemctl status memory-floor`
+then.
+
+Oracle measures the memory through the Oracle Cloud Agent: in the Oracle
+console, the instance's *Oracle Cloud Agent* tab should show *Compute Instance
+Monitoring* enabled, and *Metrics* should show memory around 30%.
+
+### When the tailnet is down
+
+Oracle's console reaches the host's serial console without the network:
+
+1. Oracle console → Compute → Instances → `ci-1` → *Console connection* →
+   *Launch Cloud Shell connection*. Press Enter and log in as `ubuntu` with
+   the console password (Set it up, step 2).
+2. Bring Tailscale back: `sudo tailscale status`, then
+   `sudo systemctl restart tailscaled`, or `sudo tailscale up`, which prints a
+   login URL to open on another device when the host was logged out.
+3. Only if you need SSH without the tailnet: open port 22 in the security
+   list to your own IP alone, then on the console
+   `sudo ufw allow from <your IP> to any port 22 proto tcp` and
+   `sudo rm /etc/ssh/sshd_config.d/00-preview-infra.conf && sudo systemctl reload ssh`.
+   Once the tailnet is back, close the port in the security list again and
+   rerun the playbook, which restores both. Remove the ufw rule by hand:
+   `sudo ufw delete allow from <your IP> to any port 22 proto tcp`.
+
+Without a console password, Oracle's *Run command* (Oracle Cloud Agent) or a
+reboot into single-user mode from the serial console are the ways in; both
+are in Oracle's documentation on console connections.
+
 ## Moving to another machine
 
 1. On the old host: `docker compose -f /opt/cloudflared/compose.yml down`. Two
@@ -660,8 +803,8 @@ redirects it to HTTPS.
 
 ```
 site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_cleanup, coolify_apps,
-                                 github_runner
-inventory/hosts.yml              which machine is the preview host
+                                 github_runner; then ci_host on the remote host
+inventory/hosts.yml              which machine is the preview host, and the remote host (ci)
 group_vars/all/defaults.yml      every setting and its default
 group_vars/all/local.yml         your settings (not in git; template: local.example.yml)
 roles/coolify/                   runs Coolify's installer once, binds its ports to loopback, limits concurrent builds
@@ -672,10 +815,14 @@ roles/preview_cleanup/           daily removal of unused Coolify images, Coolify
 roles/coolify_apps/              the applications in coolify_apps, through Coolify's API,
                                  and the environment variables of every app (tasks/env.yml)
 roles/github_runner/             optional GitHub Actions runners for private repositories, one container per job
+roles/ci_host/                   remote host base: ufw (tailnet only, DOCKER-USER), sshd, security updates, swap,
+                                 memory-floor (never idle for Oracle)
 tests/tunnel_routes.yml          offline check of the tunnel routes and DNS names
 tests/coolify_env.py             the coolify_apps role against a fake Coolify API
 tests/coolify_build_limit.yml    offline check of the build limit task
 tests/github_runner_settings.yml offline check of the runner instance names and defaults
 tests/github_runner_job.py       github-runner-job against a fake GitHub API
+tests/ci_host_settings.yml       offline check of the remote host's sshd, ufw, memory-floor and update files
+tests/memory_floor.py            how much memory memory-floor holds, and its ntfy warning, on a fake host
 .github/workflows/checks.yml     the syntax check and the tests above, on every pull request
 ```
