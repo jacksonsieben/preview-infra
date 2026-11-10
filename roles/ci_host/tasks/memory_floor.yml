@@ -1,0 +1,41 @@
+---
+# Oracle reclaims an idle Always Free instance: one whose CPU, network and
+# memory use all stay below 20% (95th percentile) for 7 days. memory-floor
+# keeps the memory in use at ci_host_memory_floor_percent, holding what the
+# real load does not use and giving it back as that load grows, and posts to
+# ntfy when the use stays below ci_host_memory_alert_percent anyway.
+
+- name: Install memory-floor
+  ansible.builtin.copy:
+    src: memory-floor
+    dest: /usr/local/bin/memory-floor
+    mode: "0755"
+  notify: Restart memory-floor
+
+# The ntfy topic is the only secret: whoever knows it can read and post.
+- name: Write memory-floor's ntfy topic
+  ansible.builtin.template:
+    src: memory-floor.env.j2
+    dest: /etc/memory-floor.env
+    mode: "0600"
+  no_log: true
+  diff: false
+  notify: Restart memory-floor
+
+- name: Install the memory-floor service
+  ansible.builtin.template:
+    src: memory-floor.service.j2
+    dest: /etc/systemd/system/memory-floor.service
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart memory-floor
+
+- name: Apply systemd changes before starting memory-floor
+  ansible.builtin.meta: flush_handlers
+
+- name: Start memory-floor
+  ansible.builtin.systemd_service:
+    name: memory-floor
+    enabled: true
+    state: started

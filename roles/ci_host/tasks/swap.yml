@@ -1,0 +1,36 @@
+---
+# A swap file of ci_host_swap_mb, so a build that outgrows the memory slows
+# down instead of being killed.
+
+- name: Check the swap file
+  ansible.builtin.stat:
+    path: "{{ ci_host_swap_file }}"
+    get_checksum: false
+  register: ci_host_swap
+
+- name: Create the swap file
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      if grep -q '^{{ ci_host_swap_file }} ' /proc/swaps; then swapoff '{{ ci_host_swap_file }}'; fi
+      rm -f '{{ ci_host_swap_file }}'
+      fallocate -l {{ ci_host_swap_mb }}M '{{ ci_host_swap_file }}'
+      chmod 600 '{{ ci_host_swap_file }}'
+      mkswap '{{ ci_host_swap_file }}'
+  when: >-
+    not ci_host_swap.stat.exists
+    or ci_host_swap.stat.size != ci_host_swap_mb | int * 1024 * 1024
+
+- name: Turn the swap file on at boot
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '^{{ ci_host_swap_file }}\s'
+    line: "{{ ci_host_swap_file }} none swap sw 0 0"
+
+- name: Turn the swap file on
+  ansible.builtin.shell:
+    cmd: |
+      if grep -q '^{{ ci_host_swap_file }} ' /proc/swaps; then exit 0; fi
+      swapon '{{ ci_host_swap_file }}' && echo on
+  register: ci_host_swapon
+  changed_when: ci_host_swapon.stdout == 'on'

@@ -1,0 +1,25 @@
+---
+# Keys only, no root, and only from tailnet addresses. sshd keeps listening on
+# every address: bound to the Tailscale address, it would fail at boot when
+# it starts before tailscaled, and lock the host. ufw already drops port 22
+# on the public interface; AllowUsers is the second lock.
+
+- name: Find sshd
+  ansible.builtin.shell:
+    cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
+  register: ci_host_sshd
+  changed_when: false
+
+# sshd keeps the first value it reads and includes sshd_config.d/*.conf at the
+# top of sshd_config, in name order: 00- comes before cloud-init's 50- file.
+- name: Allow only key logins from the tailnet
+  ansible.builtin.template:
+    src: sshd.conf.j2
+    dest: /etc/ssh/sshd_config.d/00-preview-infra.conf
+    mode: "0644"
+    validate: "{{ ci_host_sshd.stdout }} -t -f %s"
+  notify: Reload ssh
+
+- name: Check the whole sshd configuration
+  ansible.builtin.command: "{{ ci_host_sshd.stdout }} -t"
+  changed_when: false

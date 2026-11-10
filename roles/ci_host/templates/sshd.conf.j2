@@ -1,0 +1,10 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# Keys only, no root, and only from tailnet addresses. A Match block at the
+# end of sshd_config can still let a given network in (Coolify's, for one).
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+PubkeyAuthentication yes
+AllowUsers{% for cidr in ci_host_tailnet_cidrs %} *@{{ cidr }}{% endfor %}
+

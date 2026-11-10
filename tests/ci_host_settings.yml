@@ -1,0 +1,114 @@
+---
+# The ci_host role's settings and files: Oracle's InstanceServices rules as
+# they go into ufw, the sshd drop-in, memory-floor's ntfy URL and unit, and
+# the reboot window. Offline: nothing reaches a host, and
+# group_vars/all/local.yml is not read.
+#
+#   ansible-playbook tests/ci_host_settings.yml
+#
+# Task vars stand in for local.yml; they win over the defaults of vars_files.
+
+- name: Remote host settings
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/defaults.yml
+    - ../roles/ci_host/defaults/main.yml
+  vars:
+    inventory_hostname: ci-1
+    # Shaped like /etc/iptables/rules.v4 on Oracle's Ubuntu images.
+    oracle_rules: |
+      *filter
+      :INPUT ACCEPT [0:0]
+      :FORWARD ACCEPT [0:0]
+      :OUTPUT ACCEPT [463:49013]
+      :InstanceServices - [0:0]
+      -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+      -A INPUT -p icmp -j ACCEPT
+      -A INPUT -i lo -j ACCEPT
+      -A INPUT -p udp --sport 123 -j ACCEPT
+      -A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT
+      -A INPUT -j REJECT --reject-with icmp-host-prohibited
+      -A FORWARD -j REJECT --reject-with icmp-host-prohibited
+      -A OUTPUT -d 169.254.0.0/16 -j InstanceServices
+      -A InstanceServices -d 169.254.0.2/32 -p tcp -m owner --uid-owner 0 -m tcp --dport 3260 -m comment --comment "See the Oracle-Provided Images section" -j ACCEPT
+      -A InstanceServices -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -m comment --comment "See the Oracle-Provided Images section" -j ACCEPT
+      -A InstanceServices -d 169.254.0.0/16 -p tcp -m tcp -m comment --comment "See the Oracle-Provided Images section" -j REJECT --reject-with tcp-reset
+      COMMIT
+  tasks:
+    - name: Check that a host without Oracle's file keeps no rules
+      ansible.builtin.assert:
+        that:
+          - ci_host_instance_services == []
+        fail_msg: "{{ ci_host_instance_services }}"
+      vars:
+        ci_host_oracle_rules_read: { skipped: true, changed: false }
+
+    - name: Check what is kept of Oracle's rules
+      ansible.builtin.assert:
+        that:
+          - ci_host_instance_services | length == 5
+          - ci_host_instance_services[0] == ':InstanceServices - [0:0]'
+          - ci_host_instance_services[1] == '-A ufw-after-output -d 169.254.0.0/16 -j InstanceServices'
+          - ci_host_instance_services[2:] | select('match', '^-A InstanceServices ') | list | length == 3
+          # Port 22 and the REJECTs of INPUT and FORWARD stay behind.
+          - ci_host_instance_services | select('search', 'INPUT|FORWARD|dport 22') | list == []
+        fail_msg: "{{ ci_host_instance_services }}"
+      vars:
+        ci_host_oracle_rules_read:
+          content: "{{ oracle_rules | b64encode }}"
+
+    - name: Check the sshd drop-in
+      ansible.builtin.assert:
+        that:
+          - "'PasswordAuthentication no' in lines"
+          - "'KbdInteractiveAuthentication no' in lines"
+          - "'PermitRootLogin no' in lines"
+          - "'AllowUsers *@100.64.0.0/10 *@fd7a:115c:a1e0::/48' in lines"
+          - sshd_conf is match('(?s).*\n$')
+        fail_msg: "{{ sshd_conf }}"
+      vars:
+        sshd_conf: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/sshd.conf.j2') }}"
+        lines: "{{ sshd_conf.splitlines() }}"
+
+    - name: Check memory-floor's ntfy URL
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.template', '../roles/ci_host/templates/memory-floor.env.j2').splitlines()[-1]
+            == 'MEMORY_FLOOR_NTFY_URL=' ~ item.expected
+        fail_msg: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/memory-floor.env.j2') }}"
+      vars:
+        ci_host_ntfy_topic: "{{ item.topic }}"
+        ci_host_ntfy_url: "{{ item.url }}"
+      loop:
+        - { topic: "", url: https://ntfy.sh, expected: "" }
+        - { topic: s3cret-topic, url: https://ntfy.sh, expected: https://ntfy.sh/s3cret-topic }
+        - { topic: s3cret-topic, url: https://ntfy.example.com/, expected: https://ntfy.example.com/s3cret-topic }
+      loop_control:
+        label: "{{ item.url }}"
+
+    - name: Check the memory-floor unit
+      ansible.builtin.assert:
+        that:
+          - "'Environment=MEMORY_FLOOR_TARGET_PERCENT=30' in lines"
+          - "'Environment=MEMORY_FLOOR_ALERT_PERCENT=20' in lines"
+          - "'Environment=MEMORY_FLOOR_ALERT_AFTER=3600' in lines"
+          - "'Environment=MEMORY_FLOOR_HOST=ci-1' in lines"
+          - "'LimitMEMLOCK=infinity' in lines"
+          - "'OOMScoreAdjust=1000' in lines"
+          # The topic stays in the 0600 environment file, out of the unit.
+          - unit is not search('ntfy')
+        fail_msg: "{{ unit }}"
+      vars:
+        unit: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/memory-floor.service.j2') }}"
+        lines: "{{ unit.splitlines() }}"
+
+    - name: Check the reboot window
+      ansible.builtin.assert:
+        that:
+          - "'Unattended-Upgrade::Automatic-Reboot \"true\";' in lines"
+          - "'Unattended-Upgrade::Automatic-Reboot-Time \"07:30\";' in lines"
+        fail_msg: "{{ lines }}"
+      vars:
+        lines: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/52preview-infra-upgrades.j2').splitlines() }}"

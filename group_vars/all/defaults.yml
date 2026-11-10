@@ -219,3 +219,33 @@ github_runner_tool_cache_max_gb: "{{ 0 if github_runner_scope == 'org' else 5 }}
 # Give jobs their own Docker daemon (Docker in Docker, privileged) for image
 # builds, service containers and `container:` jobs. They never get the host's.
 github_runner_docker: true
+
+# ---------------------------------------------------------------------------
+# Remote host (ci-1)
+#
+# The machine in the `ci` group of inventory/hosts.yml (README, Remote host
+# (ci-1)): reachable only through the tailnet, security updates, swap, and
+# never idle for Oracle. This repository is public, so its address goes in
+# local.yml: its Tailscale address or MagicDNS name. Empty skips the host.
+# ---------------------------------------------------------------------------
+ci_host_address: ""
+ci_host_user: ubuntu
+
+# When an update needs a reboot, the host reboots at this time of its own
+# clock: UTC on Oracle's images, so 07:30 is 04:30 in Brasília.
+ci_host_reboot_time: "07:30"
+
+ci_host_swap_mb: 4096
+
+# memory-floor holds memory until this much of the host's memory is in use,
+# and gives it back as the real load grows. Oracle reclaims an Always Free
+# instance whose CPU, network and memory all stay below 20%.
+ci_host_memory_floor_percent: 30
+
+# Warn when the use stays below this percent for this many seconds anyway.
+# The warning goes to ntfy: the topic is a secret, so it goes in local.yml.
+# Empty only logs it (journalctl -u memory-floor).
+ci_host_memory_alert_percent: 20
+ci_host_memory_alert_after: 3600
+ci_host_ntfy_url: https://ntfy.sh
+ci_host_ntfy_topic: ""

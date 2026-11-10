@@ -1,0 +1,9 @@
+// Managed by Ansible (preview-infra). Local edits are overwritten.
+//
+// Read after 50unattended-upgrades, so these win. The upgrade runs with
+// apt-daily-upgrade.timer (06:00-07:00 by default); when it needs a reboot,
+// the host reboots at this time of the host's clock (UTC on Oracle's images),
+// logged-in users or not.
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+Unattended-Upgrade::Automatic-Reboot-Time "{{ ci_host_reboot_time }}";

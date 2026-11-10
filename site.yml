@@ -81,3 +81,26 @@
       loop: "{{ preview_apps_shown }}"
       loop_control:
         label: "{{ item.name }}"
+
+# The remote host's base: firewall, sshd, updates, swap, memory floor. Run it
+# alone with --limit ci.
+- name: Remote host
+  hosts: ci
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Skip the remote host without an address
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} skipped: set ci_host_address in
+          group_vars/all/local.yml (README, Remote host (ci-1)).
+      when: not ci_host_address
+
+    - name: Stop here without an address
+      ansible.builtin.meta: end_host
+      when: not ci_host_address
+
+    - name: Gather facts
+      ansible.builtin.setup:
+  roles:
+    - ci_host

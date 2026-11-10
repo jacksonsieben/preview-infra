@@ -72,3 +72,9 @@ coolify_apps:
 # github_runner_token_ref: op://Ansible/GitHub runner token/credential
 
 # Running on another machine over SSH: put it in inventory/hosts.yml.
+
+# The remote host (README, Remote host (ci-1)): its Tailscale address or
+# MagicDNS name, and the ntfy topic that hears when it is about to look idle
+# to Oracle. Use a long random topic: whoever knows it can read it.
+# ci_host_address: 100.101.102.103
+# ci_host_ntfy_topic: ""
