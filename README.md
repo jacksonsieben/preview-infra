@@ -616,10 +616,11 @@ when the job ends.
 ## Remote host (ci-1)
 
 `ci-1` is an Oracle Cloud Always Free machine (ARM, 2 OCPU, 12 GB, 200 GB
-disk, Ubuntu 24.04, user `ubuntu`) that will take the previews and their
-builds off the laptop. For now the playbook sets up its base, the `ci_host`
-role: reachable only through the tailnet, security updates, swap, and never
-idle in Oracle's eyes. Coolify on it comes later.
+disk, Ubuntu 24.04, user `ubuntu`) that takes work off the laptop. The
+playbook sets up its base, the `ci_host` role: reachable only through the
+tailnet, security updates, swap, never idle in Oracle's eyes, and Docker. On
+top of it, GitHub Actions runners for private repositories
+([Runner on ci-1](#runner-on-ci-1)). Coolify on it comes later.
 
 ### What is open
 
@@ -691,6 +692,7 @@ Afterwards, on `ci-1`:
 | `swapon --show` | `/swapfile file 4G` |
 | `journalctl -u memory-floor` | `holding <n> MiB`; `free -h` shows about 30% used |
 | `cat /etc/apt/apt.conf.d/52preview-infra-upgrades` | `Automatic-Reboot-Time "07:30"` |
+| `docker info --format '{{ .CgroupDriver }}'` | `systemd` |
 
 From outside the tailnet, `nc -vz -w 5 <public IP> 22` times out.
 
@@ -730,6 +732,75 @@ then.
 Oracle measures the memory through the Oracle Cloud Agent: in the Oracle
 console, the instance's *Oracle Cloud Agent* tab should show *Compute Instance
 Monitoring* enabled, and *Metrics* should show memory around 30%.
+
+### Runner on ci-1
+
+`ci-1` runs the same `github_runner` role as the preview host
+([GitHub Actions runner](#github-actions-runner-optional)): one job per
+container, private repositories only, each job with its own Docker daemon.
+Its settings are `ci_host_runner_*` instead of `github_runner_*`, so the two
+hosts' runners are turned on and off separately; the token, the images, Docker
+in Docker and the tool cache are shared settings. Docker comes from Ubuntu's
+packages (`docker.io`, `docker-compose-v2`), so the daily security updates
+cover it.
+
+1. **Token.** The same `GITHUB_RUNNER_TOKEN` or `github_runner_token_ref` as
+   the preview host. The repository must be among the token's *selected
+   repositories*.
+2. **Settings** in `group_vars/all/local.yml`:
+
+   ```yaml
+   ci_host_runner_enabled: true
+   ci_host_runner_repos:
+     - your-user/private-repo
+   ci_host_runner_instances: 1
+   ```
+
+3. **Run** `ansible-playbook site.yml --limit ci`. It stops if a repository is
+   public or the token cannot read it.
+4. **Check.** The repository's Settings → Actions → Runners lists
+   `ci-1-<owner>-<repo>-1-<time>` as *Idle*, with the label `ARM64`. On
+   `ci-1`: `systemctl status 'github-runner@*'`.
+5. **Use it** in the workflow:
+
+   ```yaml
+   runs-on: [self-hosted, ARM64, ci-1]
+   ```
+
+   A job that asks for `preview-host` still goes to the laptop, so the same
+   repository can move one job at a time. Once all of them are on `ci-1`,
+   take the repository out of `github_runner_repos` (the laptop's runners) and
+   rerun the playbook.
+
+| Setting | Default | |
+|---|---|---|
+| `ci_host_runner_labels` | `[self-hosted, linux, ARM64, ci-1]` | |
+| `ci_host_runner_cpu_quota` | `200%` | both cores |
+| `ci_host_runner_memory_max` | `8G` | leaves 4 GB to the system and Docker |
+| `ci_host_runner_min_free_disk_gb` | `20` | |
+
+**ARM.** Jobs run on `linux/arm64`:
+
+- The runner, `docker:dind`, `actions/setup-node`, `setup-python`,
+  `dtolnay/rust-toolchain` and Playwright's Chromium all have arm64 builds.
+  An action or tool that ships only an x64 binary fails with `exec format
+  error`; pin an arm64 build or keep that job on `ubuntu-latest`.
+- **Images built here are arm64.** The preview host is x64 and cannot run
+  them. To publish one image for both, build with
+  `docker buildx build --platform linux/amd64,linux/arm64` after
+  `docker/setup-qemu-action`, which emulates x64 and is several times
+  slower.
+
+**Memory.** `memory-floor` holds memory only while the jobs use less than 30%
+of the host, and gives it back, 64 MB every 10 seconds, as they grow. A job
+that grows faster than that can push the host into swap for a few seconds;
+`memory-floor` is the first process the kernel kills if memory runs out. Jobs
+themselves never swap (`MemorySwapMax=0`): past 8 GB, the kernel kills a
+process of the job.
+
+To turn the runners off, set `ci_host_runner_enabled: false` and rerun
+`--limit ci`; [Turn it off](#turn-it-off-back-to-githubs-runners) has the
+rest. Docker stays installed.
 
 ### When the tailnet is down
 
@@ -803,7 +874,7 @@ redirects it to HTTPS.
 
 ```
 site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_cleanup, coolify_apps,
-                                 github_runner; then ci_host on the remote host
+                                 github_runner; then ci_host and github_runner on the remote host
 inventory/hosts.yml              which machine is the preview host, and the remote host (ci)
 group_vars/all/defaults.yml      every setting and its default
 group_vars/all/local.yml         your settings (not in git; template: local.example.yml)
@@ -816,11 +887,12 @@ roles/coolify_apps/              the applications in coolify_apps, through Cooli
                                  and the environment variables of every app (tasks/env.yml)
 roles/github_runner/             optional GitHub Actions runners for private repositories, one container per job
 roles/ci_host/                   remote host base: ufw (tailnet only, DOCKER-USER), sshd, security updates, swap,
-                                 memory-floor (never idle for Oracle)
+                                 memory-floor (never idle for Oracle), Docker
 tests/tunnel_routes.yml          offline check of the tunnel routes and DNS names
 tests/coolify_env.py             the coolify_apps role against a fake Coolify API
 tests/coolify_build_limit.yml    offline check of the build limit task
-tests/github_runner_settings.yml offline check of the runner instance names and defaults
+tests/github_runner_settings.yml offline check of the runner instance names and defaults, and of ci-1's
+                                 runner settings in site.yml
 tests/github_runner_job.py       github-runner-job against a fake GitHub API
 tests/ci_host_settings.yml       offline check of the remote host's sshd, ufw, memory-floor and update files
 tests/memory_floor.py            how much memory memory-floor holds, and its ntfy warning, on a fake host
