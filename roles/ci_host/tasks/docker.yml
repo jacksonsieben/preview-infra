@@ -1,0 +1,24 @@
+---
+# Docker Engine for the GitHub Actions runner (README, Remote host (ci-1)),
+# from Ubuntu's own packages: unattended-upgrades updates them with the rest
+# of the security pocket, with no third-party repository or key to keep.
+#
+# It comes after the firewall: ufw has declared DOCKER-USER by then, and
+# Docker starts with the rules that keep published ports off the public
+# interface already in place.
+
+- name: Install Docker
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      # `docker compose`, which github-runner-job runs for every job.
+      - docker-compose-v2
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Start Docker at boot
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
