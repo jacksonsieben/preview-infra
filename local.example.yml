@@ -78,3 +78,9 @@ coolify_apps:
 # to Oracle. Use a long random topic: whoever knows it can read it.
 # ci_host_address: 100.101.102.103
 # ci_host_ntfy_topic: ""
+
+# GitHub Actions runners on ci-1 (README, Runner on ci-1), ARM64, with the
+# same token as above. Workflows use `runs-on: [self-hosted, ARM64, ci-1]`.
+# ci_host_runner_enabled: true
+# ci_host_runner_repos:
+#   - your-user/private-repo

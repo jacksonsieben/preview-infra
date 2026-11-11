@@ -249,3 +249,24 @@ ci_host_memory_alert_percent: 20
 ci_host_memory_alert_after: 3600
 ci_host_ntfy_url: https://ntfy.sh
 ci_host_ntfy_topic: ""
+
+# GitHub Actions runners on ci-1 (README, Runner on ci-1): the same
+# github_runner role and token as the preview host, with settings of their
+# own, so turning one host's runners on or off leaves the other's alone. The
+# github_runner_* settings not listed here (token, image, Docker in Docker,
+# tool cache) apply to both hosts.
+ci_host_runner_enabled: false
+ci_host_runner_scope: repo
+ci_host_runner_repos: []          # owner/name, private only
+ci_host_runner_org: ""
+ci_host_runner_instances: 1
+
+# ci-1 is ARM (aarch64): jobs, and the images they build, are linux/arm64.
+# Workflows pick it with `runs-on: [self-hosted, ARM64, ci-1]`.
+ci_host_runner_labels: [self-hosted, linux, ARM64, ci-1]
+
+# ci-1 has 2 cores and 12 GB, and nothing else heavy runs on it yet: the
+# runners get both cores and 8 GB, and leave 4 GB to the system and Docker.
+ci_host_runner_cpu_quota: 200%
+ci_host_runner_memory_max: 8G
+ci_host_runner_min_free_disk_gb: 20
