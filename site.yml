@@ -82,8 +82,8 @@
       loop_control:
         label: "{{ item.name }}"
 
-# The remote host's base: firewall, sshd, updates, swap, memory floor. Run it
-# alone with --limit ci.
+# The remote host's base (firewall, sshd, updates, swap, memory floor, Docker)
+# and its GitHub Actions runners. Run it alone with --limit ci.
 - name: Remote host
   hosts: ci
   become: true
@@ -104,3 +104,17 @@
       ansible.builtin.setup:
   roles:
     - ci_host
+    # ci-1's own runners, from the ci_host_runner_* settings: github_runner_*
+    # stay those of the preview host. Stops them when ci_host_runner_enabled
+    # is false.
+    - role: github_runner
+      vars:
+        github_runner_enabled: "{{ ci_host_runner_enabled }}"
+        github_runner_scope: "{{ ci_host_runner_scope }}"
+        github_runner_repos: "{{ ci_host_runner_repos }}"
+        github_runner_org: "{{ ci_host_runner_org }}"
+        github_runner_instances: "{{ ci_host_runner_instances }}"
+        github_runner_labels: "{{ ci_host_runner_labels }}"
+        github_runner_cpu_quota: "{{ ci_host_runner_cpu_quota }}"
+        github_runner_memory_max: "{{ ci_host_runner_memory_max }}"
+        github_runner_min_free_disk_gb: "{{ ci_host_runner_min_free_disk_gb }}"

@@ -70,3 +70,33 @@
         that:
           - not github_runner_enabled
           - github_runner_wanted == {}
+
+    # site.yml hands ci-1's settings to the role as github_runner_*; one left
+    # out would silently take the preview host's value on ci-1.
+    - name: Check that the ci play maps every ci_host_runner setting
+      ansible.builtin.assert:
+        that:
+          - mapped | length > 0
+          - mapped == expected
+        fail_msg: "github_runner vars of the ci play: {{ mapped }}"
+      vars:
+        plays: "{{ lookup('ansible.builtin.file', '../site.yml') | from_yaml }}"
+        ci_play: "{{ plays | selectattr('hosts', 'eq', 'ci') | first }}"
+        mapped: >-
+          {{ (ci_play.roles | select('mapping') | selectattr('role', 'eq', 'github_runner')
+              | first).vars }}
+        settings: >-
+          {{ (lookup('ansible.builtin.file', '../group_vars/all/defaults.yml') | from_yaml).keys()
+             | select('match', '^ci_host_runner_') | list }}
+        expected: >-
+          {{ dict(settings | map('regex_replace', '^ci_host_runner_', 'github_runner_')
+                  | zip(settings | map('regex_replace', '^(.*)$', '{{ \1 }}'))) }}
+
+    - name: Check ci-1's runner defaults
+      ansible.builtin.assert:
+        that:
+          - not ci_host_runner_enabled
+          - "'ARM64' in ci_host_runner_labels"
+          - "'x64' not in ci_host_runner_labels"
+          - "'ci-1' in ci_host_runner_labels"
+        fail_msg: "Labels: {{ ci_host_runner_labels }}"
