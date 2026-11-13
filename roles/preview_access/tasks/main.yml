@@ -1,0 +1,146 @@
+---
+# Cloudflare Access protects preview_zones at Cloudflare's edge only. Traefik
+# listens on 127.0.0.1:80 and routes by Host header, so without this any
+# process on this host could skip the login with
+# `curl -H 'Host: main.<zone>' http://127.0.0.1/`. Here Traefik checks the
+# token itself: every request goes through preview-access (a forward-auth
+# service on the coolify network), which refuses a host on a protected zone
+# unless the request carries a valid Cf-Access-Jwt-Assertion for that zone's
+# Access application. Hosts on `domain` pass as before.
+#
+# Needs cloudflare_access_team_domain and cloudflare_access_auds from the
+# cloudflare_tunnel role, which creates the Access applications.
+
+- name: Protect the preview zones on this host too
+  when: preview_zones | length > 0
+  vars:
+    preview_access_zones: "{{ cloudflare_access_auds | default({}) | dict2items | map(attribute='key') | sort }}"
+  block:
+    - name: Check the Access settings from the cloudflare_tunnel role
+      ansible.builtin.assert:
+        that:
+          - cloudflare_access_team_domain | default('') is match('^[a-z0-9.-]+$')
+          - preview_access_zones == preview_zones | map(attribute='zone') | map('lower') | sort
+          - cloudflare_access_auds.values() | map('first') | map('length') | min > 0
+        fail_msg: >-
+          Every zone of preview_zones needs its Access application's audience
+          (AUD) and the Access team domain: run the whole playbook, not this
+          role alone.
+        quiet: true
+
+    - name: Create the preview-access directory
+      ansible.builtin.file:
+        path: "{{ preview_access_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Install preview-access
+      ansible.builtin.copy:
+        src: preview-access.py
+        dest: "{{ preview_access_dir }}/preview-access.py"
+        mode: "0644"
+      notify: Restart preview-access
+
+    - name: Write the preview-access settings
+      ansible.builtin.copy:
+        content: >-
+          {{ {'listen': ['0.0.0.0', preview_access_port | int],
+              'issuer': 'https://' ~ cloudflare_access_team_domain,
+              'zones': cloudflare_access_auds} | to_nice_json }}
+        dest: "{{ preview_access_dir }}/config.json"
+        mode: "0644"
+      notify: Restart preview-access
+
+    - name: Write the preview-access compose file
+      ansible.builtin.template:
+        src: compose.yml.j2
+        dest: "{{ preview_access_dir }}/compose.yml"
+        mode: "0644"
+      notify: Restart preview-access
+
+    - name: Start preview-access
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ preview_access_dir }}"
+      register: preview_access_up
+      changed_when: "'Started' in preview_access_up.stderr or 'Recreated' in preview_access_up.stderr"
+
+    - name: Apply the preview-access changes
+      ansible.builtin.meta: flush_handlers
+
+    # Traefik answers 500 to every request while the middleware's service is
+    # down, so it must answer before Traefik uses it. No Host: lets it through.
+    - name: Wait for preview-access
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - preview-access
+          - python3
+          - -c
+          - "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:{{ preview_access_port }}/').status)"
+      register: preview_access_ready
+      changed_when: false
+      until: preview_access_ready.rc == 0 and preview_access_ready.stdout == '200'
+      retries: 10
+      delay: 3
+
+    # Traefik's file provider picks up changes to this file by itself.
+    - name: Define the preview-access middleware in Traefik
+      ansible.builtin.template:
+        src: traefik.yaml.j2
+        dest: "{{ preview_access_traefik_file }}"
+        mode: "0644"
+
+    - name: Put preview-access in front of every Traefik route
+      ansible.builtin.include_tasks: entrypoints.yml
+      vars:
+        preview_access_on: true
+
+    # Straight to Traefik, as a local process would: refused, without the
+    # Cloudflare Access login.
+    - name: Check that Traefik refuses the protected zones without a token
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers:
+          Host: "{{ preview_access_probe }}.{{ item }}"
+        status_code: 403
+      loop: "{{ preview_access_zones }}"
+      loop_control:
+        label: "curl -H 'Host: {{ preview_access_probe }}.{{ item }}' http://127.0.0.1/"
+      register: preview_access_probe_result
+      until: preview_access_probe_result is not failed
+      retries: 12
+      delay: 5
+
+# Without preview_zones nothing is protected: take the middleware off
+# Traefik first, then stop the service it calls.
+- name: Remove preview-access
+  when: preview_zones | length == 0
+  block:
+    - name: Take preview-access off Traefik's routes
+      ansible.builtin.include_tasks: entrypoints.yml
+      vars:
+        preview_access_on: false
+
+    - name: Remove the preview-access middleware from Traefik
+      ansible.builtin.file:
+        path: "{{ preview_access_traefik_file }}"
+        state: absent
+
+    - name: Look for preview-access
+      ansible.builtin.stat:
+        path: "{{ preview_access_dir }}/compose.yml"
+      register: preview_access_compose
+
+    - name: Stop preview-access
+      ansible.builtin.command:
+        cmd: docker compose down
+        chdir: "{{ preview_access_dir }}"
+      changed_when: true
+      when: preview_access_compose.stat.exists
+
+    - name: Remove the preview-access directory
+      ansible.builtin.file:
+        path: "{{ preview_access_dir }}"
+        state: absent

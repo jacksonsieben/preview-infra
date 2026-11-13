@@ -84,9 +84,21 @@
         access_app: >-
           {{ access_apps.json.result | default([], true)
              | selectattr('name', '==', access_name) | first | default({}) }}
+      register: access_app_saved
       changed_when: true
       when: >-
         not access_app
         or access_app.domain | default('') != access_zone.wildcard
         or access_app.session_duration | default('') != preview_access_session_duration
         or access_app.policies | default([], true) | map(attribute='id') | list != [access_policy_id]
+
+    # The application's audience (AUD tag) is in every token Access issues
+    # for it; preview-access (roles/preview_access) checks it on this host.
+    - name: Remember the Access application's audience
+      ansible.builtin.set_fact:
+        cloudflare_access_auds: >-
+          {{ cloudflare_access_auds | combine({access_zone.zone | lower: [access_app.aud]}) }}
+      vars:
+        access_app: >-
+          {{ access_app_saved.json.result if access_app_saved is not skipped
+             else access_apps.json.result | selectattr('name', '==', access_name) | first }}

@@ -57,6 +57,9 @@
     - role: tailscale_dashboard
       when: coolify_dashboard == 'tailscale'
     - cloudflare_tunnel
+    # Traefik checks the Access token of preview_zones itself (after
+    # cloudflare_tunnel, which reads the team domain and the AUDs).
+    - preview_access
     - preview_cleanup
     - role: coolify_apps
       when: coolify_apps | length > 0 or preview_apps | length > 0

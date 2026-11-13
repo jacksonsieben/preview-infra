@@ -1,0 +1,18 @@
+---
+# preview-access: the Cloudflare Access check on this host (tasks/main.yml).
+preview_access_dir: /opt/preview-access
+
+# Runs files/preview-access.py, which needs the standard library only.
+preview_access_image: python:3.13-alpine
+
+# Port inside the `coolify` Docker network; not published on the host.
+preview_access_port: 9180
+
+# Coolify mounts /data/coolify/proxy at /traefik in its proxy and reads
+# /traefik/dynamic/ as Traefik's file provider.
+preview_access_traefik_file: /data/coolify/proxy/dynamic/preview-access.yaml
+
+# Name asked for on each protected zone, straight to Traefik on 127.0.0.1,
+# after the run: it must be refused (403). A router for it is part of
+# preview_access_traefik_file, so it is routed even before any app exists.
+preview_access_probe: preview-infra-check

@@ -118,6 +118,34 @@
   vars:
     dns_zone_id: "{{ cloudflare_zone_id }}"
 
+# The team domain issues the Access tokens and publishes the keys that sign
+# them; preview-access (roles/preview_access) checks both on this host.
+- name: Look up the Access team domain
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/access/organizations"
+    headers: *cloudflare_headers
+  register: cloudflare_access_org
+  failed_when: false
+  when: cloudflare_extra_zones | length > 0
+
+- name: Check the Access team domain
+  ansible.builtin.assert:
+    that:
+      - cloudflare_access_org.status | default(0) == 200
+      - cloudflare_access_org.json.result.auth_domain | default('') is match('^[a-z0-9.-]+$')
+    fail_msg: >-
+      Could not read the Access team domain (HTTP {{ cloudflare_access_org.status | default('?') }}).
+      Give the API token Account → Access: Organizations, Identity Providers,
+      and Groups: Read, and create the Zero Trust organization if there is
+      none yet (README, More zones and apps).
+    quiet: true
+  when: cloudflare_extra_zones | length > 0
+
+- name: Remember the Access team domain
+  ansible.builtin.set_fact:
+    cloudflare_access_team_domain: "{{ cloudflare_access_org.json.result.auth_domain | default('') }}"
+    cloudflare_access_auds: {}
+
 # Access goes up before the DNS record, so a new zone is never reachable
 # without the login, not even for the length of one run.
 - name: Put Cloudflare Access in front of the other preview zones

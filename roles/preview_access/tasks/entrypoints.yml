@@ -1,0 +1,40 @@
+---
+# Coolify's routers come from container labels it writes again on every
+# deploy, so the middleware does not go on them: it goes on Traefik's http and
+# https entrypoints, which run it before every router. Those are command-line
+# flags in the proxy configuration Coolify keeps in its database, changed
+# through its own actions like the loopback ports (roles/coolify,
+# loopback_ports.yml). With preview_access_on false the flags are taken out
+# again. Prints ok, changed, or what went wrong.
+
+- name: "{{ 'Run' if preview_access_on else 'Stop running' }} every Traefik request through preview-access"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        $s = App\Models\Server::find(0);
+        $c = App\Actions\Proxy\GetProxyConfiguration::run($s);
+        $n = preg_replace('/^[ \t]*- [\x27"]?--entrypoints\.https?\.http\.middlewares=preview-access@file[\x27"]?[ \t]*\n/mi', '', $c);
+        $found = 1;
+        if ({{ 'true' if preview_access_on else 'false' }}) {
+          $n = preg_replace('/^([ \t]*- )([\x27"]?)--entrypoints\.http\.address=[^\n]*$/mi',
+            "\$0\n\$1\$2--entrypoints.http.http.middlewares=preview-access@file\$2\n\$1\$2--entrypoints.https.http.middlewares=preview-access@file\$2",
+            $n, 1, $found);
+        }
+        if ($found !== 1) { echo 'no --entrypoints.http.address in the proxy configuration'; }
+        elseif ($n === $c) { echo 'ok'; } else {
+          App\Actions\Proxy\SaveProxyConfiguration::run($s, $n);
+          App\Actions\Proxy\StartProxy::run($s, async: false, force: true);
+          echo 'changed';
+        }
+  register: preview_access_entrypoints
+  changed_when: "'changed' in preview_access_entrypoints.stdout_lines"
+  failed_when: >-
+    preview_access_entrypoints.rc != 0
+    or preview_access_entrypoints.stdout_lines | select('in', ['ok', 'changed']) | list | length == 0
