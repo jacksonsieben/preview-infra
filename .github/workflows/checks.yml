@@ -45,3 +45,5 @@ jobs:
         run: ansible-playbook tests/ci_host_settings.yml
       - name: Memory floor
         run: python3 tests/memory_floor.py
+      - name: Preview access check
+        run: python3 tests/preview_access.py

@@ -1,0 +1,21 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+services:
+  preview-access:
+    image: {{ preview_access_image }}
+    # Traefik reaches it by this name on the coolify network.
+    container_name: preview-access
+    command: [python3, -I, /app/preview-access.py, /app/config.json]
+    volumes:
+      - ./preview-access.py:/app/preview-access.py:ro
+      - ./config.json:/app/config.json:ro
+    networks: [coolify]
+    restart: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+
+networks:
+  coolify:
+    external: true

@@ -1,0 +1,6 @@
+---
+- name: Restart preview-access
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ preview_access_dir }}"
+  changed_when: true

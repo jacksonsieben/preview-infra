@@ -96,6 +96,10 @@ permissions, and one more account permission:
 | Permission | Access |
 |---|---|
 | Account → Access: Apps and Policies | Edit |
+| Account → Access: Organizations, Identity Providers, and Groups | Read |
+
+The second one reads the team domain, whose keys sign the Access tokens that
+Traefik checks on this host (see [Security](#security)).
 
 **Coolify admin account.** The playbook creates it when it installs Coolify,
 so nobody else can claim the registration page. The password needs upper and
@@ -145,7 +149,9 @@ It is idempotent; rerun it any time. Afterwards:
   pointing at the tunnel.
 - With more zones: each has a proxied `*` CNAME too, and Zero Trust → Access →
   Applications lists `preview-infra: <zone> previews`. The last task of the
-  role opened `https://preview-infra-check.<zone>` and got the Access login.
+  role opened `https://preview-infra-check.<zone>` and got the Access login,
+  and the preview_access role got 403 for the same name straight from Traefik
+  on 127.0.0.1 (no token). `docker ps` lists `preview-access`.
 
 ## Step 4 — Connect GitHub and a project
 
@@ -239,7 +245,11 @@ preview_zones:
 `access_emails` on a zone overrides `preview_access_emails` for it. Rerun
 the playbook. It creates the Access application before the DNS record, and
 fails at the end if `https://preview-infra-check.example.dev` does not answer
-with the Access login.
+with the Access login. Traefik on this host then checks the Access token
+too, so a local process can't skip the login either (see
+[Security](#security)); the run fails if
+`curl -H 'Host: preview-infra-check.example.dev' http://127.0.0.1/` is not
+refused with 403.
 
 **Per app:** describe it in `local.yml`, under `preview_apps`. Unlike
 `coolify_apps` ([Step 4](#step-4--connect-github-and-a-project)), whose
@@ -408,16 +418,27 @@ After that:
   not route a zone in `preview_zones` without an e-mail to allow, and checks
   after every run that the zone asks for the login. Previews on `domain`
   stay public, as before.
-- **Access is only enforced at Cloudflare, not on this host.** Traefik
-  listens on 127.0.0.1:80 and routes by `Host` header alone, so any process
-  on the preview host, agent workers included, skips the login with
-  `curl -H 'Host: main.example.dev' http://127.0.0.1/`. A local process could
-  do an app's first run (and become its owner) before you do. Nothing on the
-  LAN can: Traefik is bound to loopback. Until Traefik checks the Access token
-  itself ([#6](https://github.com/jacksonsieben/preview-infra/issues/6):
-  validate `Cf-Access-Jwt-Assertion` against the Access certs), do the first
-  run of a new deployment yourself right away, and run on this host only
-  processes you would trust with the previews.
+- **Traefik checks the Access token too, not only Cloudflare.** Traefik
+  listens on 127.0.0.1:80 and routes by `Host` header, so without a check of
+  its own any process on the preview host, agent workers included, would skip
+  the login with `curl -H 'Host: main.example.dev' http://127.0.0.1/`, and
+  could do an app's first run (and become its owner) before you do. The
+  preview_access role puts a forward-auth service, `preview-access`, in front
+  of every route of Coolify's Traefik: a request to a host on one of
+  `preview_zones` passes only with the `Cf-Access-Jwt-Assertion` header that
+  Cloudflare adds after the login, signed by your team's Access keys, for that
+  zone's Access application, and not expired. Anything else gets 403. Hosts on
+  `domain` pass untouched. The middleware goes on Traefik's entrypoints, in
+  Coolify's proxy configuration (Coolify rewrites the labels of its routers on
+  every deploy), so it covers every preview Coolify creates. Two things follow:
+  - while `preview-access` is down, Traefik answers 500 to **every** request,
+    `domain` and production included. It restarts with Docker; check it with
+    `docker ps --filter name=preview-access` and
+    `docker logs preview-access` (it logs each refused request).
+  - if you reset the proxy configuration in Coolify, the check is gone until
+    the next run of the playbook, which puts it back and fails if
+    `curl -H 'Host: preview-infra-check.<zone>' http://127.0.0.1/` is not
+    refused.
 - **Coolify's ports are bound to 127.0.0.1.** Docker's published ports bypass
   ufw, so by default the dashboard (8000, 6001, 6002) and Traefik (80, 443)
   answer to the whole LAN, Traefik even for the dashboard's hostname. The
@@ -873,7 +894,7 @@ redirects it to HTTPS.
 ## Layout
 
 ```
-site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_cleanup, coolify_apps,
+site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_access, preview_cleanup, coolify_apps,
                                  github_runner; then ci_host and github_runner on the remote host
 inventory/hosts.yml              which machine is the preview host, and the remote host (ci)
 group_vars/all/defaults.yml      every setting and its default
@@ -882,6 +903,8 @@ roles/coolify/                   runs Coolify's installer once, binds its ports 
 roles/tailscale_dashboard/       dashboard on the tailnet with Tailscale Serve
 roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in Docker,
                                  Cloudflare Access for the other zones (tasks/access.yml)
+roles/preview_access/            Traefik checks the Access token of the other zones itself (preview-access,
+                                 a forward-auth service on Coolify's network)
 roles/preview_cleanup/           daily removal of unused Coolify images, Coolify cleanup mode
 roles/coolify_apps/              the applications in coolify_apps, through Coolify's API,
                                  and the environment variables of every app (tasks/env.yml)
@@ -896,5 +919,6 @@ tests/github_runner_settings.yml offline check of the runner instance names and 
 tests/github_runner_job.py       github-runner-job against a fake GitHub API
 tests/ci_host_settings.yml       offline check of the remote host's sshd, ufw, memory-floor and update files
 tests/memory_floor.py            how much memory memory-floor holds, and its ntfy warning, on a fake host
+tests/preview_access.py          which requests preview-access lets through, with tokens signed by openssl
 .github/workflows/checks.yml     the syntax check and the tests above, on every pull request
 ```
