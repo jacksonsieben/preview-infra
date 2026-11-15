@@ -1,7 +1,8 @@
 ---
-# How many builds Coolify runs at once on this host. It keeps the rest in its
-# queue. The setting lives in Coolify's database, so it goes through tinker,
-# which also works on a first run, before the API has a token.
+# How many builds Coolify runs at once on a server (coolify_server_php: this
+# host, unless roles/ci_previews passes the remote one). It keeps the rest in
+# its queue. The setting lives in Coolify's database, so it goes through
+# tinker, which also works on a first run, before the API has a token.
 
 - name: Check the build limit
   ansible.builtin.assert:
@@ -20,7 +21,7 @@
       - tinker
       - --execute
       - >-
-        $s = App\Models\Server::find(0)->settings;
+        $s = ({{ coolify_server_php }})->settings;
         if ((int) $s->concurrent_builds === {{ coolify_concurrent_builds | int }}) { echo 'ok'; } else {
           $s->concurrent_builds = {{ coolify_concurrent_builds | int }};
           $s->save();

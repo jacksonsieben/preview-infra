@@ -43,6 +43,26 @@
 
     # coolify_apps are changed through Coolify's API on every run; an app set up
     # by hand from preview_apps would be overwritten with their settings.
+    # An app with `server` is the one Coolify deploys on ci-1 for its PR
+    # previews (README, Previews on ci-1), on a network of its own there.
+    - name: Check the preview apps on ci-1
+      ansible.builtin.assert:
+        that:
+          - ci_previews_enabled | bool
+          - item.server == ci_previews_coolify_server
+          - item.network | default('') in ci_previews_networks
+          - item.zone | lower in ci_previews_zones | map('lower') | list
+        fail_msg: >-
+          {{ item.name }} has server: {{ item.server }}. That needs
+          ci_previews_enabled, server equal to ci_previews_coolify_server
+          ({{ ci_previews_coolify_server }}), a network listed in
+          ci_previews_networks, and its zone in ci_previews_zones (README,
+          Previews on ci-1).
+        quiet: true
+      loop: "{{ preview_apps_shown | selectattr('server', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
     - name: Check that no app is in both coolify_apps and preview_apps
       ansible.builtin.assert:
         that: >-
@@ -65,28 +85,49 @@
       when: coolify_apps | length > 0 or preview_apps | length > 0
     # Stops the runners when github_runner_enabled is false.
     - github_runner
+  tasks:
+    # ci-1's settings in this host's Coolify: its proxy and builds (README,
+    # Previews on ci-1). ci-1 itself is set up by the play below.
+    - name: The previews on ci-1, in Coolify
+      ansible.builtin.include_role:
+        name: ci_previews
+        tasks_from: coolify
+      when: ci_previews_enabled | bool
   post_tasks:
     # Coolify keeps its applications in its own database; these are the values
     # to enter in its dashboard (README, More zones and apps).
     - name: Coolify settings for the preview apps
       ansible.builtin.debug:
-        msg:
-          - "Resource: Private Repository (with GitHub App), {{ item.repository }}, branch main"
-          - "Build Pack: Dockerfile. Ports Exposes: {{ item.port }}"
-          - "Domains: http://{{ 'main' ~ suffix }}.{{ item.zone }}"
-          - "Health check: on, path {{ item.healthcheck_path }}, port {{ item.port }}"
-          - "Persistent storage: {{ ('volume mounted at ' ~ item.data_path) if item.data_path | default('') else 'none' }}"
-          - "Preview Deployments: {{ 'on' if item.previews | default(true) | bool else 'off (on demand, README: Build load)' }}. Auto Deploy: on"
-          - "Preview URL Template: pr-{% raw %}{{pr_id}}{% endraw %}{{ suffix }}.{{ item.zone }}"
-          - "Environment variables: none by hand; the playbook sets preview_env and production_env"
+        msg: "{{ common[:1] + (on_ci if item.server is defined else []) + common[1:] }}"
       vars:
         suffix: "{{ ('-' ~ item.preview_name) if item.preview_name | default('') else '' }}"
+        common:
+          - "Resource: Private Repository (with GitHub App), {{ item.repository }}, branch main"
+          - "Build Pack: Dockerfile. Ports Exposes: {{ item.port }}"
+          # The app on ci-1 is never deployed itself, only its PR previews:
+          # its domain only gives Coolify the scheme of the preview URLs, and
+          # ci-1 refuses it (not a PR preview).
+          - "Domains: http://{{ ('previews' if item.server is defined else 'main') ~ suffix }}.{{ item.zone }}"
+          - "Health check: on, path {{ item.healthcheck_path }}, port {{ item.port }}"
+          - "Persistent storage: {{ ('volume mounted at ' ~ item.data_path) if item.data_path | default('') else 'none' }}"
+          - >-
+            Preview Deployments: {{ 'on' if item.previews | default(true) | bool else 'off (on demand, README: Build load)' }}.
+            Auto Deploy: {{ 'off (set by the playbook)' if item.server is defined else 'on' }}
+          - "Preview URL Template: pr-{% raw %}{{pr_id}}{% endraw %}{{ suffix }}.{{ item.zone }}"
+          - "Environment variables: none by hand; the playbook sets preview_env and production_env"
+        on_ci:
+          - "Server: {{ item.server | default('') }}. Destination: previews-{{ item.network | default('') }}"
+          - >-
+            Resource limits: set by the playbook ({{ item.cpus | default(ci_previews_cpus) }} CPU,
+            {{ item.memory | default(ci_previews_memory) }} of memory, no swap, for each preview)
       loop: "{{ preview_apps_shown }}"
       loop_control:
         label: "{{ item.name }}"
 
-# The remote host's base (firewall, sshd, updates, swap, memory floor, Docker)
-# and its GitHub Actions runners. Run it alone with --limit ci.
+# The remote host's base (firewall, sshd, updates, swap, memory floor, Docker),
+# its GitHub Actions runners and the PR previews it runs for the preview
+# host's Coolify. Run it alone with --limit ci, except the first time the
+# previews are turned on (README, Previews on ci-1).
 - name: Remote host
   hosts: ci
   become: true
@@ -121,3 +162,7 @@
         github_runner_cpu_quota: "{{ ci_host_runner_cpu_quota }}"
         github_runner_memory_max: "{{ ci_host_runner_memory_max }}"
         github_runner_min_free_disk_gb: "{{ ci_host_runner_min_free_disk_gb }}"
+    # The PR previews the preview host's Coolify runs here, their tunnel and
+    # their limits (README, Previews on ci-1). Takes them down when
+    # ci_previews_enabled is false.
+    - ci_previews

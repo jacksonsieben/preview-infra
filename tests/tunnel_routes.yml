@@ -64,3 +64,74 @@
           - "'example.com' not in cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list"
           - cloudflare_tunnel_dns_names == ['coolify.example.com', '*.example.com']
         fail_msg: "Routes: {{ cloudflare_tunnel_ingress }}. DNS: {{ cloudflare_tunnel_dns_names }}"
+
+    # PR previews of both zones on ci-1 (README, Previews on ci-1): the
+    # preview host keeps the webhooks, the apex and main.<zone>, and no
+    # wildcard.
+    - name: Move the previews of both zones to ci-1
+      ansible.builtin.set_fact:
+        ci_previews_enabled: true
+        ci_previews_zones: [example.com, Example.dev]
+        production_hostnames: [example.com, main.example.dev]
+
+    - name: Check the preview host's routes with the previews on ci-1
+      ansible.builtin.assert:
+        that:
+          - cloudflare_tunnel_ingress == expected
+          - cloudflare_ci_zones == ['example.com', 'example.dev']
+          - cloudflare_local_zones == []
+        fail_msg: "Routes: {{ cloudflare_tunnel_ingress }}. ci-1 zones: {{ cloudflare_ci_zones }}"
+      vars:
+        expected:
+          - {hostname: coolify.example.com, path: ^/webhooks/, service: "http://127.0.0.1:8000"}
+          - {hostname: coolify.example.com, service: "http_status:404"}
+          - {hostname: example.com, service: "http://127.0.0.1:80"}
+          - {hostname: main.example.dev, service: "http://127.0.0.1:80"}
+          - {service: "http_status:404"}
+
+    - name: Check the preview host's DNS names, each in its zone
+      ansible.builtin.assert:
+        that:
+          - cloudflare_tunnel_dns_names == ['coolify.example.com', 'example.com', 'main.example.dev']
+          - "cloudflare_tunnel_dns_zones == {'coolify.example.com': 'example.com', 'example.com': 'example.com', 'main.example.dev': 'example.dev'}"
+          # The Access application of the zone stays, for both hosts.
+          - cloudflare_extra_zones | map(attribute='zone') | list == ['example.dev']
+        fail_msg: "DNS: {{ cloudflare_tunnel_dns_names }}, zones {{ cloudflare_tunnel_dns_zones }}"
+
+    - name: Move only the second zone's previews
+      ansible.builtin.set_fact:
+        ci_previews_zones: [example.dev]
+
+    - name: Check that the domain keeps its wildcard then
+      ansible.builtin.assert:
+        that:
+          - "'*.example.com' in cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list"
+          - "'*.example.dev' not in cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list"
+          - cloudflare_tunnel_dns_names == ['coolify.example.com', '*.example.com', 'example.com', 'main.example.dev']
+          - cloudflare_tunnel_dns_zones['*.example.com'] == 'example.com'
+        fail_msg: "Routes: {{ cloudflare_tunnel_ingress }}. DNS: {{ cloudflare_tunnel_dns_names }}"
+
+    - name: Turn the previews on ci-1 off
+      ansible.builtin.set_fact:
+        ci_previews_enabled: false
+
+    - name: Check that both wildcards come back to the preview host
+      ansible.builtin.assert:
+        that:
+          - cloudflare_ci_zones == []
+          - "'*.example.com' in cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list"
+          - "'*.example.dev' in cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list"
+          - cloudflare_local_zones | map(attribute='wildcard') | list == ['*.example.dev']
+        fail_msg: "Routes: {{ cloudflare_tunnel_ingress }}"
+
+    - name: Put a production hostname on no known zone
+      ansible.builtin.set_fact:
+        production_hostnames: [example.com, www.elsewhere.org, badexample.dev]
+
+    - name: Check that it has no zone (the run stops then)
+      ansible.builtin.assert:
+        that:
+          - cloudflare_tunnel_dns_zones['www.elsewhere.org'] == ''
+          - cloudflare_tunnel_dns_zones['badexample.dev'] == ''
+          - cloudflare_tunnel_dns_zones['example.com'] == 'example.com'
+        fail_msg: "Zones: {{ cloudflare_tunnel_dns_zones }}"

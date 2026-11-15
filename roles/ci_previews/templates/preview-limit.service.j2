@@ -1,0 +1,9 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+[Unit]
+Description=Keep at most {{ ci_previews_max }} PR previews running
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/preview-limit {{ ci_previews_max }}

@@ -7,3 +7,7 @@ coolify_install_script_url: https://cdn.coollabs.io/coolify/install.sh
 # Distribution IDs the installer accepts. A derivative whose ID is not listed
 # runs as the first ID_LIKE entry that is.
 coolify_supported_os: [arch, ubuntu, debian, raspbian, centos, fedora, rhel, ol, rocky, sles, opensuse-leap, opensuse-tumbleweed, almalinux, amzn, alpine]
+
+# The Coolify server that build_limit.yml and proxy_ports.yml change, as PHP:
+# this host. roles/ci_previews passes the remote host's.
+coolify_server_php: 'App\Models\Server::find(0)'

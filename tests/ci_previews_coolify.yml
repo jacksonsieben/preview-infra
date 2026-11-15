@@ -1,0 +1,95 @@
+---
+# The preview host's side of the previews on ci-1 (roles/ci_previews,
+# tasks/coolify.yml) against a stand-in for `docker exec coolify ... tinker`:
+# each setting goes to ci-1's server, not this host's, and its proxy gets
+# preview-access and the noindex header. Offline: nothing outside a temporary
+# directory is called or changed.
+#
+#   ansible-playbook tests/ci_previews_coolify.yml
+
+- name: ci-1 in the preview host's Coolify
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Read the defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all/defaults.yml"
+
+    - name: Make a temporary directory
+      ansible.builtin.tempfile:
+        state: directory
+      register: fake_dir
+
+    # Answers `found` or `missing` to the lookup of the server, and `ok` to
+    # every setting; logs each call, one per line.
+    - name: Write the stand-in for docker
+      ansible.builtin.copy:
+        dest: "{{ fake_dir.path }}/docker"
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          printf '%s\n' "$*" | tr '\n' ' ' >> "{{ fake_dir.path }}/calls"
+          echo >> "{{ fake_dir.path }}/calls"
+          case "$*" in
+            *'->exists()'*) cat "{{ fake_dir.path }}/server" ;;
+            *) echo ok ;;
+          esac
+
+    - name: Run the tasks against the stand-in
+      environment:
+        PATH: "{{ fake_dir.path }}:{{ lookup('ansible.builtin.env', 'PATH') }}"
+      block:
+        - name: "Answer for: ci-1 not in Coolify yet"
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/server"
+            content: "missing\n"
+
+        - name: ci-1 not in Coolify yet
+          ansible.builtin.include_role:
+            name: ci_previews
+            tasks_from: coolify
+
+        - name: Check that only the lookup ran
+          ansible.builtin.assert:
+            that: calls | length == 1
+            fail_msg: "Calls: {{ calls }}"
+          vars:
+            calls: "{{ lookup('ansible.builtin.file', fake_dir.path ~ '/calls').splitlines() }}"
+
+        - name: "Answer for: ci-1 in Coolify"
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/server"
+            content: "found\n"
+
+        - name: Forget the calls so far
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/calls"
+            content: ""
+
+        - name: ci-1 in Coolify
+          ansible.builtin.include_role:
+            name: ci_previews
+            tasks_from: coolify
+          vars:
+            ci_previews_concurrent_builds: 2
+
+        - name: Check every setting went to ci-1's server
+          ansible.builtin.assert:
+            that:
+              - calls | length == 5
+              - calls[1:] | select('search', "App\\\\Models\\\\Server::where\\('name', 'ci-1'\\)->firstOrFail\\(\\)") | list | length == 4
+              - calls | select('search', 'Server::find\\(0\\)') | list == []
+              - calls[1] is search('concurrent_builds = 2;')
+              - calls[2] is search('127.0.0.1:')
+              - calls[3] is search('force_docker_cleanup = false;')
+              - calls[4] is search('--entrypoints.http.http.middlewares=preview-access@file,preview-noindex@file')
+              - calls[4] is search('--entrypoints.https.http.middlewares=preview-access@file,preview-noindex@file')
+            fail_msg: "Calls: {{ calls }}"
+          vars:
+            calls: "{{ lookup('ansible.builtin.file', fake_dir.path ~ '/calls').splitlines() }}"
+      always:
+        - name: Remove the temporary directory
+          ansible.builtin.file:
+            path: "{{ fake_dir.path }}"
+            state: absent

@@ -84,3 +84,35 @@ coolify_apps:
 # ci_host_runner_enabled: true
 # ci_host_runner_repos:
 #   - your-user/private-repo
+
+# PR previews on ci-1 instead of here (README, Previews on ci-1). Coolify
+# here builds and runs them there; ci-1 publishes them through its own
+# tunnel. Production stays here: list what this host still serves on those
+# zones in production_hostnames.
+# ci_previews_enabled: true
+# ci_previews_zones: ["{{ domain }}", example.dev]
+# production_hostnames: [main.example.dev]
+# ci_previews_coolify_address: 100.101.102.104   # `tailscale ip -4` on this host
+# ci_previews_coolify_key: ssh-ed25519 AAAA...   # ci-1's key in Coolify, public half
+# ci_previews_networks: [myapp, site]            # one per app: previews-<name> on ci-1
+# ci_previews_max: 3                             # previews running at once
+# ci_previews_cpus: "1"                          # each preview's limits
+# ci_previews_memory: 1g
+# preview_apps:
+#   - name: myapp                  # production, here: no previews
+#     repository: you/myapp
+#     zone: example.dev
+#     port: 8740
+#     healthcheck_path: /health
+#     data_path: /data
+#     previews: false
+#   - name: myapp-previews         # the same repository, on ci-1, for its PRs
+#     repository: you/myapp
+#     zone: example.dev
+#     port: 8740
+#     healthcheck_path: /health
+#     data_path: /data
+#     server: ci-1                 # ci_previews_coolify_server
+#     network: myapp               # one of ci_previews_networks
+#     previews: true
+#     memory: 768m                 # optional, else ci_previews_memory

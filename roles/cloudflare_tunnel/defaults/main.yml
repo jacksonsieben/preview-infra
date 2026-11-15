@@ -31,28 +31,62 @@ cloudflare_tunnel_coolify_ingress:
     - hostname: "{{ coolify_hostname }}"
       service: http://127.0.0.1:8000
 
+#
+# A zone whose previews ci-1 serves (cloudflare_ci_zones) keeps only the names
+# listed in production_hostnames here: its wildcard goes to ci-1's tunnel.
 cloudflare_tunnel_ingress: >-
   {{ cloudflare_tunnel_coolify_ingress[coolify_dashboard]
      + production_hostnames | map('community.general.dict_kv', 'hostname')
        | map('combine', {'service': 'http://127.0.0.1:80'}) | list
-     + [
+     + ([] if domain | lower in cloudflare_ci_zones else [
        {'hostname': preview_wildcard, 'service': 'http://127.0.0.1:80'},
-     ] + cloudflare_extra_zones | map(attribute='wildcard') | map('community.general.dict_kv', 'hostname')
+     ]) + cloudflare_local_zones | map(attribute='wildcard') | map('community.general.dict_kv', 'hostname')
          | map('combine', {'service': 'http://127.0.0.1:80'}) | list + [
        {'service': 'http_status:404'},
      ] }}
 
-# DNS records pointed at the tunnel, in `domain`. More specific records (apex,
-# www) still win over the wildcard, so production can live elsewhere, unless it
-# is listed in production_hostnames. Each zone in preview_zones gets its
-# wildcard pointed there too.
-cloudflare_tunnel_dns_names: "{{ [coolify_hostname, preview_wildcard] + production_hostnames }}"
+# DNS records pointed at the tunnel. More specific records (apex, www) still
+# win over the wildcard, so production can live elsewhere, unless it is listed
+# in production_hostnames. Each zone in preview_zones gets its wildcard
+# pointed there too (cloudflare_local_zones), unless ci-1 serves its previews.
+cloudflare_tunnel_dns_names: >-
+  {{ [coolify_hostname]
+     + ([] if domain | lower in cloudflare_ci_zones else [preview_wildcard])
+     + production_hostnames }}
+
+# The zone of each name in cloudflare_tunnel_dns_names: the longest of
+# `domain` and preview_zones that the name is, or ends with. Empty for a name
+# on none of them (the run stops then).
+cloudflare_tunnel_dns_zones: >-
+  {%- set zones = ([domain] + preview_zones | map(attribute='zone', default='') | list) | map('lower') | list -%}
+  {%- set out = {} -%}
+  {%- for name in cloudflare_tunnel_dns_names -%}
+  {%- set ns = namespace(zone='') -%}
+  {%- for zone in zones if zone and (name | lower == zone or (name | lower).endswith('.' ~ zone)) -%}
+  {%- if zone | length > ns.zone | length %}{% set ns.zone = zone %}{% endif -%}
+  {%- endfor -%}
+  {%- set _ = out.update({name: ns.zone}) -%}
+  {%- endfor -%}
+  {{ out }}
+
+# The zones whose PR previews ci-1 serves through its own tunnel
+# (roles/ci_previews): their wildcard is neither routed here nor pointed at
+# this tunnel. Their Access application stays here, for both hosts.
+cloudflare_ci_zones: "{{ ci_previews_zones | map('lower') | list if ci_previews_enabled | bool else [] }}"
 
 # preview_zones with their defaults filled in.
 cloudflare_extra_zones: >-
   {%- set zones = [] -%}
   {%- for z in preview_zones -%}
   {%- set _ = zones.append({'zone': '', 'wildcard': '*.' ~ (z.zone | default('')), 'access_emails': preview_access_emails} | combine(z)) -%}
+  {%- endfor -%}
+  {{ zones }}
+
+# The zones of preview_zones whose wildcard comes to this host.
+cloudflare_local_zones: >-
+  {%- set zones = [] -%}
+  {%- for z in cloudflare_extra_zones if z.zone | lower not in cloudflare_ci_zones -%}
+  {%- set _ = zones.append(z) -%}
   {%- endfor -%}
   {{ zones }}
 

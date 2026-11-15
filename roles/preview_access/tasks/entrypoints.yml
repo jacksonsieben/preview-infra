@@ -6,6 +6,10 @@
 # through its own actions like the loopback ports (roles/coolify,
 # loopback_ports.yml). With preview_access_on false the flags are taken out
 # again. Prints ok, changed, or what went wrong.
+#
+# preview_access_server_php picks the Coolify server (this host by default,
+# the remote host from roles/ci_previews), and preview_access_middlewares the
+# middlewares, which always start with preview-access@file.
 
 - name: "{{ 'Run' if preview_access_on else 'Stop running' }} every Traefik request through preview-access"
   ansible.builtin.command:
@@ -18,13 +22,13 @@
       - tinker
       - --execute
       - >-
-        $s = App\Models\Server::find(0);
+        $s = {{ preview_access_server_php }};
         $c = App\Actions\Proxy\GetProxyConfiguration::run($s);
-        $n = preg_replace('/^[ \t]*- [\x27"]?--entrypoints\.https?\.http\.middlewares=preview-access@file[\x27"]?[ \t]*\n/mi', '', $c);
+        $n = preg_replace('/^[ \t]*- [\x27"]?--entrypoints\.https?\.http\.middlewares=preview-access@file[^\x27"\n]*[\x27"]?[ \t]*\n/mi', '', $c);
         $found = 1;
         if ({{ 'true' if preview_access_on else 'false' }}) {
           $n = preg_replace('/^([ \t]*- )([\x27"]?)--entrypoints\.http\.address=[^\n]*$/mi',
-            "\$0\n\$1\$2--entrypoints.http.http.middlewares=preview-access@file\$2\n\$1\$2--entrypoints.https.http.middlewares=preview-access@file\$2",
+            "\$0\n\$1\$2--entrypoints.http.http.middlewares={{ preview_access_middlewares | join(',') }}\$2\n\$1\$2--entrypoints.https.http.middlewares={{ preview_access_middlewares | join(',') }}\$2",
             $n, 1, $found);
         }
         if ($found !== 1) { echo 'no --entrypoints.http.address in the proxy configuration'; }

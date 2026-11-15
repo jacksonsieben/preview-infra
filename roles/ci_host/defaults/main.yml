@@ -26,6 +26,22 @@ ci_host_instance_services: >-
      | map('regex_replace', '^-A OUTPUT ', '-A ufw-after-output ')
      | list }}
 
+# The bridges of the PR preview networks (roles/ci_previews): previews-<name>
+# is on pv-<name>. What they send off their own bridge reaches the internet
+# only: never the tailnet, another bridge (the runners' jobs, another app's
+# previews, Coolify's network), Oracle's network, or its instance metadata and
+# services at 169.254.0.0/16. The host itself is already closed to them: ufw
+# denies whatever arrives on an interface other than tailscale0.
+ci_host_preview_bridges: >-
+  {{ ci_previews_networks | map('regex_replace', '^', 'pv-') | list
+     if ci_previews_enabled | default(false) | bool else [] }}
+ci_host_preview_blocked_v4: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+# Except DNS (port 53) to Oracle's resolver: Docker's embedded DNS may send a
+# container's lookups from the container's own namespace. The instance
+# metadata, on port 80 of the same address, stays out of reach.
+ci_host_preview_dns: [169.254.169.254]
+ci_host_preview_isolation_file: /etc/preview-infra/preview-isolation.nft
+
 ci_host_swap_file: /swapfile
 
 # memory-floor wakes up this often (seconds) and holds memory in chunks of

@@ -16,3 +16,33 @@ preview_access_traefik_file: /data/coolify/proxy/dynamic/preview-access.yaml
 # after the run: it must be refused (403). A router for it is part of
 # preview_access_traefik_file, so it is routed even before any app exists.
 preview_access_probe: preview-infra-check
+
+# The zones whose Access token Traefik checks: those of preview_zones, with
+# the audiences the cloudflare_tunnel role read.
+preview_access_zones: "{{ cloudflare_access_auds | default({}) | dict2items | map(attribute='key') | sort }}"
+
+# Whether preview-access runs here. On the preview host, while there is a zone
+# to protect; the remote host (ci_previews role) sets it on.
+preview_access_wanted: "{{ preview_zones | length > 0 }}"
+
+# Only hosts matching one of these regular expressions are served; the others
+# get 403. Empty serves every host (the preview host). The ci_previews role
+# narrows the remote host to PR previews.
+preview_access_hosts: []
+
+# Zones that get the probe router, and the check that Traefik refuses it.
+preview_access_probe_zones: "{{ preview_access_zones }}"
+
+# The Traefik middlewares put on Coolify's http and https entrypoints, in
+# order. preview-noindex@file adds X-Robots-Tag: noindex to every answer, for
+# a host that serves previews only.
+preview_access_noindex: false
+preview_access_middlewares: "{{ ['preview-access@file'] + (['preview-noindex@file'] if preview_access_noindex else []) }}"
+
+# Whether this role changes the proxy configuration through the Coolify on
+# this host (tasks/entrypoints.yml). The remote host has no Coolify of its
+# own: the preview host changes its proxy (roles/ci_previews, coolify.yml).
+preview_access_manage_proxy: true
+
+# The Coolify server whose proxy entrypoints.yml changes, as PHP.
+preview_access_server_php: 'App\Models\Server::find(0)'

@@ -19,6 +19,10 @@ preview is removed when the PR closes.
   [More zones and apps](#more-zones-and-apps).
 - **A GitHub Actions runner** (optional) runs the Actions jobs of your private
   repositories here, one container per job, instead of on GitHub's minutes.
+- **A remote host** (optional, `ci-1`) takes work off this one: Actions
+  runners, and the PR previews themselves, which Coolify then builds and runs
+  there so no PR code runs on this machine. See
+  [Previews on ci-1](#previews-on-ci-1).
 
 ```
 PR opened / pushed ─► GitHub App webhook ─► coolify.example.com/webhooks/ ─┐
@@ -242,7 +246,11 @@ preview_zones:
   - zone: example.dev
 ```
 
-`access_emails` on a zone overrides `preview_access_emails` for it. Rerun
+`access_emails` on a zone overrides `preview_access_emails` for it. A name
+there outside the wildcard's previews, served by an app here (`main.example.dev`
+once the previews move to [ci-1](#previews-on-ci-1)), can go in
+`production_hostnames`: it gets its own route and record in that zone, behind
+the same Access login. Rerun
 the playbook. It creates the Access application before the DNS record, and
 fails at the end if `https://preview-infra-check.example.dev` does not answer
 with the Access login. Traefik on this host then checks the Access token
@@ -356,7 +364,12 @@ fake Coolify API and checks the environment variables.
 against a stand-in for `docker`.
 `ansible-playbook tests/github_runner_settings.yml` checks the runner instance
 names and defaults, and `python3 tests/github_runner_job.py` runs
-`github-runner-job` against a fake GitHub API. The *Checks* workflow
+`github-runner-job` against a fake GitHub API.
+`ansible-playbook tests/ci_previews_settings.yml` checks the routes, hosts and
+Traefik file of the previews on `ci-1`, `ansible-playbook
+tests/ci_previews_coolify.yml` that their Coolify settings go to `ci-1`'s
+server, and `python3 tests/preview_limit.py` which previews `preview-limit`
+stops. The *Checks* workflow
 (`.github/workflows/checks.yml`) runs them all on every pull request, on
 GitHub's runners.
 
@@ -414,6 +427,10 @@ After that:
   serves `coolify.<domain>/webhooks/` alone, and GitHub signs every webhook.
   With `public`, consider Cloudflare Access in front of it, leaving
   `/webhooks/*` outside the policy.
+- **PR code can run elsewhere.** With [Previews on ci-1](#previews-on-ci-1),
+  Coolify builds and runs the PR previews of those apps on `ci-1`, each app
+  on a network that reaches only the internet; this host keeps the webhooks
+  and production. What stays open there is listed in that section.
 - **Previews on more zones are behind Cloudflare Access.** The playbook will
   not route a zone in `preview_zones` without an e-mail to allow, and checks
   after every run that the zone asks for the login. Previews on `domain`
@@ -477,7 +494,8 @@ Run it now with `sudo systemctl start coolify-prune-images` and check what it
 removed with `journalctl -u coolify-prune-images`.
 
 The script works per Coolify application, not per domain, so previews on
-every zone are covered. A preview's volume (`<volume>-pr-<n>`) is deleted by
+every zone are covered. With [Previews on ci-1](#previews-on-ci-1) it runs on
+`ci-1` too, where those previews are built. A preview's volume (`<volume>-pr-<n>`) is deleted by
 Coolify itself when the PR closes; `docker volume ls --filter name=-pr-`
 lists those still there.
 
@@ -641,7 +659,8 @@ disk, Ubuntu 24.04, user `ubuntu`) that takes work off the laptop. The
 playbook sets up its base, the `ci_host` role: reachable only through the
 tailnet, security updates, swap, never idle in Oracle's eyes, and Docker. On
 top of it, GitHub Actions runners for private repositories
-([Runner on ci-1](#runner-on-ci-1)). Coolify on it comes later.
+([Runner on ci-1](#runner-on-ci-1)), and the PR previews the preview host's
+Coolify runs there ([Previews on ci-1](#previews-on-ci-1)).
 
 ### What is open
 
@@ -790,8 +809,8 @@ cover it.
 
    A job that asks for `preview-host` still goes to the laptop, so the same
    repository can move one job at a time. Once all of them are on `ci-1`,
-   take the repository out of `github_runner_repos` (the laptop's runners) and
-   rerun the playbook.
+   retire the laptop's runners of that repository
+   ([Retiring a runner](#retiring-a-runner)).
 
 | Setting | Default | |
 |---|---|---|
@@ -845,6 +864,271 @@ Without a console password, Oracle's *Run command* (Oracle Cloud Agent) or a
 reboot into single-user mode from the serial console are the ways in; both
 are in Oracle's documentation on console connections.
 
+## Previews on ci-1
+
+The PR previews of some apps can run on `ci-1` instead of the preview host,
+so no pull request code runs on the preview host, not even its build. The
+preview host's Coolify still receives GitHub's webhooks, and manages `ci-1`
+as a second server over SSH through the tailnet. It builds each preview there
+(natively, `linux/arm64`) and runs it on a Docker network of the app's own.
+`ci-1` publishes the previews through a Cloudflare tunnel of its own and
+still has no port open to the internet. Production stays where it is.
+
+```
+PR opened ─► GitHub App webhook ─► coolify.example.com/webhooks/ ─► Coolify on the preview host
+                                                                        │ SSH as root, through the tailnet:
+                                                                        │ builds and runs the preview on ci-1
+                                                                        ▼
+https://pr-12.example.dev ─────────┬─► Cloudflare ─► ci-1's tunnel ─► Traefik ─► preview-access ─► preview
+https://pr-36-preview.example.com ─┘   (Access on      (cloudflared)   127.0.0.1   PR hosts only,     network
+                                        example.dev)                               token, noindex     previews-<app>
+
+https://main.example.dev ─► Cloudflare (Access) ─► preview host's tunnel ─► Traefik ─► production (unchanged)
+```
+
+**What moves.** Each zone of `ci_previews_zones` gets its wildcard DNS
+record pointed at `ci-1`'s tunnel (`ci_previews_tunnel_name`), and loses its
+wildcard route on the preview host's. Cloudflare can't route `pr-*` alone
+(DNS and tunnel wildcards are `*.<zone>` only), so the names the preview host
+keeps on those zones each get a record and a route of their own: list them
+in `production_hostnames` (`main.example.dev`, for one). Coolify's webhook
+host stays as it is. On `ci-1`, Traefik answers only for
+`pr-<n>.<zone>` and `pr-<n>-<name>.<zone>` (`ci_previews_host_pattern`):
+any other name there gets 403 from `preview-access`, with *this host
+serves pull request previews only*. The zones of `preview_zones` stay behind
+their Access application, which the preview host's play keeps, and
+`preview-access` on `ci-1` checks the same token as on the preview host. The
+others stay public, as before. Every answer from `ci-1` carries
+`X-Robots-Tag: noindex, nofollow`, on top of the apps' own.
+
+**Two apps per repository.** Coolify deploys a PR preview on the server of
+the application it belongs to. An app whose production stays on the preview
+host gets a second Coolify application from the same repository, on `ci-1`,
+with *Preview Deployments* on, and the first one gets them off. The one on
+`ci-1` is never deployed itself: the playbook keeps its *Auto Deploy* off
+(pushes to `main` skip it), and its domain (`previews.<zone>`, printed at the
+end of the run) is refused there anyway. Its `preview_apps` entry has
+`server` and `network`:
+
+```yaml
+preview_apps:
+  - name: myapp                    # production, on the preview host
+    repository: you/myapp
+    zone: example.dev
+    port: 8740
+    healthcheck_path: /health
+    data_path: /data
+    previews: false
+    production_env: {}
+  - name: myapp-previews           # its PR previews, on ci-1
+    repository: you/myapp
+    zone: example.dev
+    port: 8740
+    healthcheck_path: /health
+    data_path: /data
+    server: ci-1                   # ci_previews_coolify_server
+    network: myapp                 # one of ci_previews_networks
+    previews: true
+    memory: 768m                   # optional: ci_previews_memory otherwise
+    preview_env: {}
+```
+
+An app with nothing on the preview host (production elsewhere) needs only
+the second entry. Its old application on the preview host, if any: delete
+it, or at least turn its *Preview Deployments* off, or its PRs get a preview
+there too.
+
+### What a preview reaches
+
+| From a preview container on `ci-1` | |
+|---|---|
+| its own network (`previews-<app>`), Traefik included | yes |
+| the internet | yes |
+| the tailnet (the preview host, your devices) | no |
+| `ci-1` itself (sshd, Docker, anything on its addresses) | no: ufw denies every interface but `tailscale0` |
+| the runners' job networks, `coolify`, another app's previews | no |
+| Oracle's network (`10.0.0.0/8`) and its metadata (`169.254.0.0/16`) | no, except DNS (port 53) to Oracle's resolver, `169.254.169.254` |
+
+The `ci_host` role loads `/etc/preview-infra/preview-isolation.nft`, a table
+of its own hooked before iptables' FORWARD chain: Tailscale's `ts-forward`
+accepts everything that leaves on `tailscale0`, and can come before Docker's
+`DOCKER-USER` there, so the rules can't live in `DOCKER-USER`. A drop in this
+table is final whatever the others accept. Check it with
+`sudo nft list table inet preview_isolation`.
+
+Coolify logs in to `ci-1` as root, with the key in `ci_previews_coolify_key`,
+from `ci_previews_coolify_address` only: a `Match User root Address` block at
+the end of `/etc/ssh/sshd_config` and a `from=` on the key in
+`/root/.ssh/authorized_keys`. Every other login keeps `ci_host`'s rules.
+
+What is still open, and why:
+
+- **Builds use the host's network.** Coolify runs `docker build --network
+  host`, so a `RUN` step of a PR's Dockerfile can reach what `ci-1` reaches,
+  the tailnet included. That is the same trust as the Actions jobs on
+  `ci-1`, which are privileged: only repository members get previews (PRs
+  from forks never do), and only private repositories get the runner.
+  Narrow it in Tailscale's access controls: let nothing on `ci-1` open a
+  connection to your other devices (Coolify's SSH goes the other way).
+- **The tunnel token is on `ci-1`** (`/opt/cloudflared/.env`, root only). A
+  job that becomes root could serve other names of `ci_previews_zones` with
+  it. The Cloudflare API token never goes there: the play calls the API
+  from the machine you run it on.
+- **A PR closed while the preview host is off** loses its webhook, and its
+  preview stays (stopped by `preview-limit` once newer ones need the room).
+  Delete it in Coolify: the application → *Preview Deployments* → *Delete*.
+
+### Limits
+
+- **Each preview:** `ci_previews_cpus` (1) and `ci_previews_memory` (1g),
+  without swap, or `cpus` and `memory` on its `preview_apps` entry. The
+  playbook sets them in Coolify (*Resource Limits*), which applies them to
+  every preview of the app.
+- **At once:** `ci_previews_max` previews (3), all apps together.
+  `preview-limit.timer` checks every minute and stops those deployed
+  longest ago; a push to their PR, or *Redeploy* in Coolify, starts them
+  again (`journalctl -u preview-limit` lists what it stopped).
+- **Builds:** one at a time on `ci-1` (`ci_previews_concurrent_builds`),
+  queued in Coolify. A build has no memory limit of its own.
+- **Cleanup:** when a PR closes, Coolify removes its preview and its volume.
+  `coolify-prune-images` runs daily on `ci-1` too (see [Cleanup](#cleanup)),
+  and Coolify's own forced cleanup stays off there: it would remove the
+  runners' images.
+
+**Memory budget** (`ci-1`: 12 GB, 4 GB of swap, 2 cores):
+
+| | Memory | |
+|---|---|---|
+| system, Docker, Tailscale, cloudflared, Traefik, preview-access | ~0.6 GB | no limit |
+| Actions runners and their jobs (`github_runner.slice`) | up to 8 GB | `ci_host_runner_memory_max`, no swap |
+| previews | up to 3 GB | `ci_previews_max` × `ci_previews_memory`, no swap |
+| one preview build | ~2-3 GB | no limit; it may swap |
+| `memory-floor` | 0 to 3.6 GB | holds memory only while the rest uses less than 30% |
+
+`memory-floor` never competes: it holds memory only while the host uses
+less than 30% (3.6 GB), and gives it back 64 MB every 10 seconds as the rest
+grows. Three idle previews and an idle runner already use a good part of
+that. The limits together pass 12 GB only when the CI is at its 8 GB cap,
+three previews run at their limit and a build runs, all at once. Then the
+build and the system go into swap and slow down; the jobs and previews
+cannot swap and are killed at their own limit, never each other's. If
+`free -h` shows swap in use often, lower `ci_host_runner_memory_max` (6G) or
+`ci_previews_max` (2). `systemd-cgtop` and `docker stats` show who uses what.
+
+CPU: the runners get both cores at most (`ci_host_runner_cpu_quota`) and
+half the weight of everything else, so under contention builds and previews
+get two thirds. Each preview has its own `ci_previews_cpus`.
+
+### Turn it on
+
+In Coolify, in Cloudflare and in `local.yml`, in this order. The API token
+needs nothing new: it already edits DNS on both zones and the tunnels of the
+account. Each run is the whole playbook, `ansible-playbook site.yml -K`
+(the preview host's play first, then `ci-1`'s); `--limit ci` alone refuses
+to move a wildcard before the preview host has the records of its own names.
+
+1. **A key for `ci-1` in Coolify:** *Keys & Tokens → Private Keys → + Add →
+   Generate new ED25519 SSH Key*, name `ci-1`, *Continue*. Copy its public
+   key.
+2. **Settings** in `group_vars/all/local.yml`:
+
+   ```yaml
+   ci_previews_enabled: true
+   ci_previews_zones: ["{{ domain }}", example.dev]
+   production_hostnames: [main.example.dev]   # what the preview host keeps there
+   ci_previews_coolify_address: 100.x.y.z     # `tailscale ip -4` on the preview host
+   ci_previews_coolify_key: ssh-ed25519 AAAA...
+   ci_previews_networks: [myapp, site]        # one per app
+   ```
+
+3. **Run the playbook.** The preview host gets the records and routes of
+   `production_hostnames` and drops the wildcards; `ci-1` gets Coolify's
+   login, the networks `previews-myapp` and `previews-site`, its tunnel (Zero
+   Trust → Networks → Tunnels shows `ci-1-previews` *Healthy*) and the
+   wildcards. Old previews on the preview host stop answering then.
+   `Coolify has no server named 'ci-1' yet` is expected.
+4. **`ci-1` in Coolify:** *Servers → + Add*: name `ci-1`
+   (`ci_previews_coolify_server`), IP address: `ci-1`'s **Tailscale IP**
+   (`tailscale ip -4` there; Coolify resolves names inside its container,
+   without MagicDNS), port 22, user `root`, key `ci-1`. *Continue*, then
+   *Validate Server*: Docker is already there. Leave *Sentinel* (metrics)
+   off: it would have `ci-1` call the preview host.
+5. **A destination per network:** *Servers → ci-1 → Destinations → + Add*,
+   name and network `previews-myapp`; the same for each of
+   `ci_previews_networks`. Coolify keeps the networks the playbook made.
+6. **Run the playbook again.** It sets `ci-1`'s proxy (127.0.0.1 only,
+   `preview-access`, noindex) and starts it, and checks that
+   `https://preview-infra-check.<domain>/` answers 403 from `ci-1`.
+7. **The applications on `ci-1`:** for each app, *Projects → the project →
+   + Add → Resource → Private Repository (with GitHub App)*, server `ci-1`, destination
+   `previews-<network>`, the repository and `main`, and the values the run
+   printed under *Coolify settings for the preview apps*. Name it as its
+   `preview_apps` entry (`myapp-previews`). Don't press *Deploy*.
+8. **`preview_apps`** in `local.yml` as [above](#previews-on-ci-1):
+   `previews: false` on the app that stays, the entry with `server` for the
+   one on `ci-1`, and its `preview_env` moved there. **Run the playbook a
+   third time:** it sets the limits and *Auto Deploy* off on `ci-1`'s apps,
+   previews off on the others, and the variables.
+9. **Open a test PR** (below).
+
+### Check
+
+| Where | Command or URL | Expected |
+|---|---|---|
+| the PR | the GitHub App's comment | a link `http://pr-<n>.example.dev` (or `pr-<n>-preview.<domain>`) |
+| Coolify | the app on `ci-1` → *Preview Deployments* | the PR, *Running*, deployed on `ci-1` |
+| browser | `https://pr-<n>.example.dev` | the Access login, then the app |
+| browser | `https://pr-<n>-preview.example.com` | the site, no login |
+| anywhere | `curl -sI https://pr-<n>-preview.example.com \| grep -i x-robots-tag` | `x-robots-tag: noindex, nofollow` |
+| `ci-1` | `docker ps --filter label=coolify.pullRequestId=<n>` | the preview's container |
+| `ci-1` | `docker inspect -f '{{json .NetworkSettings.Networks}}' <container>` | `previews-<app>` only |
+| `ci-1` | `curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: main.example.dev' http://127.0.0.1/` | `403` |
+| `ci-1` | `docker run --rm --network previews-<app> busybox wget -T 5 -qO /dev/null http://example.com && echo out` | `out`: the internet |
+| `ci-1` | `docker run --rm --network previews-<app> busybox nslookup example.com` | an address: DNS works |
+| `ci-1` | `docker run --rm --network previews-<app> busybox wget -T 5 -qO- http://100.100.100.100/` | `download timed out`: no tailnet |
+| `ci-1` | `docker run --rm --network previews-<app> busybox wget -T 5 -qO- http://169.254.169.254/opc/v2/instance/` | `download timed out`: no instance metadata |
+| `ci-1` | `systemctl list-timers preview-limit.timer coolify-prune-images.timer` | both scheduled |
+| preview host | `docker ps --filter label=coolify.pullRequestId=<n>` | nothing |
+| browser | `https://main.example.dev` | production, unchanged |
+
+Close the PR: within a minute the preview's container and volume are gone
+from `ci-1` (`docker ps -a --filter label=coolify.pullRequestId=<n>` and
+`docker volume ls --filter name=-pr-<n>` list nothing).
+
+### Rollback
+
+1. Set `ci_previews_enabled: false` in `local.yml` (keep the rest), turn
+   *Preview Deployments* back on for the apps on the preview host (or
+   `previews: true` on their entries), and run the playbook. The preview
+   host takes the wildcards back (route and DNS), and `ci-1` stops its
+   cloudflared, `preview-access`, `preview-limit` and Coolify's root login.
+2. In Coolify, delete the applications on `ci-1` (their previews go with
+   them), stop its proxy (*Servers → ci-1 → Proxy → Stop*), then delete the
+   server `ci-1`.
+3. What stays, to remove by hand when you are done: the tunnel
+   `ci-1-previews` (Zero Trust → Networks → Tunnels → Delete), the
+   `previews-*` networks on `ci-1` (`docker network rm`), and the key `ci-1`
+   in Coolify.
+
+## Retiring a runner
+
+A runner whose repository no longer sends it jobs still waits for one, with
+its own registration on GitHub. To retire it:
+
+1. Check that no workflow asks for it: the repository's `.github/workflows/`
+   has no `runs-on` with its labels (`preview-host` for the preview host).
+2. Take the repository out of `github_runner_repos` (or `ci_host_runner_repos`)
+   in `local.yml`, and run the playbook. It stops `github-runner@<owner>-<repo>-<n>`,
+   and the runner deletes its registration on GitHub as it stops.
+3. Check on GitHub: the repository's *Settings → Actions → Runners* lists no
+   `preview-host-<owner>-<repo>-…`. From a shell:
+   `gh api repos/<owner>/<repo>/actions/runners --jq '.runners[] | [.id, .name, .status] | @tsv'`.
+   A leftover one (the host was off when it stopped) goes with *Remove
+   runner* there, or `gh api -X DELETE repos/<owner>/<repo>/actions/runners/<id>`.
+4. If no host serves the repository anymore, take it out of the token's
+   *Repository access* (GitHub → Settings → Developer settings → Fine-grained
+   tokens → the runner token). The token is shared by both hosts.
+
 ## Moving to another machine
 
 1. On the old host: `docker compose -f /opt/cloudflared/compose.yml down`. Two
@@ -895,7 +1179,8 @@ redirects it to HTTPS.
 
 ```
 site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_access, preview_cleanup, coolify_apps,
-                                 github_runner; then ci_host and github_runner on the remote host
+                                 github_runner, ci_previews (coolify.yml); then ci_host, github_runner and ci_previews on the
+                                 remote host
 inventory/hosts.yml              which machine is the preview host, and the remote host (ci)
 group_vars/all/defaults.yml      every setting and its default
 group_vars/all/local.yml         your settings (not in git; template: local.example.yml)
@@ -910,7 +1195,9 @@ roles/coolify_apps/              the applications in coolify_apps, through Cooli
                                  and the environment variables of every app (tasks/env.yml)
 roles/github_runner/             optional GitHub Actions runners for private repositories, one container per job
 roles/ci_host/                   remote host base: ufw (tailnet only, DOCKER-USER), sshd, security updates, swap,
-                                 memory-floor (never idle for Oracle), Docker
+                                 memory-floor (never idle for Oracle), the previews' network isolation (nftables), Docker
+roles/ci_previews/               PR previews on the remote host: Coolify's login, networks, its own tunnel, preview-access,
+                                 preview-limit; and the remote server's settings in the preview host's Coolify (coolify.yml)
 tests/tunnel_routes.yml          offline check of the tunnel routes and DNS names
 tests/coolify_env.py             the coolify_apps role against a fake Coolify API
 tests/coolify_build_limit.yml    offline check of the build limit task
@@ -920,5 +1207,8 @@ tests/github_runner_job.py       github-runner-job against a fake GitHub API
 tests/ci_host_settings.yml       offline check of the remote host's sshd, ufw, memory-floor and update files
 tests/memory_floor.py            how much memory memory-floor holds, and its ntfy warning, on a fake host
 tests/preview_access.py          which requests preview-access lets through, with tokens signed by openssl
+tests/ci_previews_settings.yml   offline check of the remote host's preview routes, hosts, kept names and Traefik file
+tests/ci_previews_coolify.yml    the remote server's Coolify settings against a stand-in for docker
+tests/preview_limit.py           which previews preview-limit stops, against a stand-in for docker
 .github/workflows/checks.yml     the syntax check and the tests above, on every pull request
 ```

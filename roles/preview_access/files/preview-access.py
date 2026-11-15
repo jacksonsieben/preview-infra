@@ -9,6 +9,10 @@ application (aud), and not expired. Cloudflare adds that header to every
 request it lets through Access; a request made on this host straight to
 Traefik has none. Every other host passes untouched.
 
+With `hosts` in the configuration (the remote host, which serves PR
+previews only), a host must also match one of those regular expressions,
+whole and ignoring case, or it is refused before anything else.
+
 Answers 200 (pass) or 403 (refused), which Traefik returns as is.
 
     python3 preview-access.py config.json
@@ -17,7 +21,10 @@ config.json, written by the preview_access role:
 
     {"listen": ["0.0.0.0", 9180],
      "issuer": "https://<team>.cloudflareaccess.com",
-     "zones": {"example.dev": ["<aud tag of the zone's Access application>"]}}
+     "zones": {"example.dev": ["<aud tag of the zone's Access application>"]},
+     "hosts": ["^pr-[0-9]+\\.example\\.dev$"]}
+
+`hosts` is optional; without it every host is served.
 
 Standard library only. The keys come from <issuer>/cdn-cgi/access/certs,
 fetched at start, every hour, and again when a token names an unknown key
@@ -30,6 +37,7 @@ import binascii
 import hashlib
 import hmac
 import json
+import re
 import sys
 import threading
 import time
@@ -50,6 +58,8 @@ MAX_TOKEN = 16384
 SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
 
 DENIED = b"Forbidden: this preview needs a Cloudflare Access login.\n"
+NOT_SERVED = b"Forbidden: this host serves pull request previews only.\n"
+HOST_NOT_SERVED = "host not served here"
 
 
 def log(message):
@@ -152,9 +162,17 @@ def is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def check(host, token, zones, issuer, keys, now):
+def served(host, hosts):
+    """True when `host` matches one of `hosts` (compiled patterns), or there are none."""
+    return not hosts or any(pattern.fullmatch(host) for pattern in hosts)
+
+
+def check(host, token, zones, issuer, keys, now, hosts=()):
     """(allowed, reason) for a request to `host` carrying `token`."""
-    zone = protected_zone(normalize_host(host), zones)
+    host = normalize_host(host)
+    if not served(host, hosts):
+        return False, HOST_NOT_SERVED
+    zone = protected_zone(host, zones)
     if zone is None:
         return True, "not protected"
     if not token:
@@ -204,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             allowed, reason = check(host, self.headers.get("Cf-Access-Jwt-Assertion"),
                                     self.server.zones, self.server.issuer,
-                                    self.server.keys, time.time())
+                                    self.server.keys, time.time(), self.server.hosts)
         except Exception as error:  # noqa: BLE001 - refuse rather than drop the connection
             allowed, reason = False, f"error: {error!r}"
         if allowed:
@@ -213,13 +231,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         log(f"refused {normalize_host(host)}: {reason}")
+        body = NOT_SERVED if reason == HOST_NOT_SERVED else DENIED
         self.send_response(403)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(DENIED)))
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         if send_body:
-            self.wfile.write(DENIED)
+            self.wfile.write(body)
 
     # Traefik asks with GET whatever the original method was.
     def do_GET(self):
@@ -238,6 +257,7 @@ def serve(config, keys=None):
     server.daemon_threads = True
     server.issuer = issuer
     server.zones = {zone.lower(): list(auds) for zone, auds in config["zones"].items()}
+    server.hosts = [re.compile(pattern, re.IGNORECASE) for pattern in config.get("hosts", [])]
     server.keys = keys or Keys(issuer + "/cdn-cgi/access/certs")
     return server
 
@@ -251,8 +271,12 @@ def main():
     with open(sys.argv[1]) as file:
         config = json.load(file)
     server = serve(config)
-    threading.Thread(target=refresh_forever, args=(server.keys,), daemon=True).start()
-    log(f"protecting {', '.join(sorted(server.zones))} with {server.issuer}")
+    # No protected zone (a host that only narrows the hosts): no keys to fetch.
+    if server.zones:
+        threading.Thread(target=refresh_forever, args=(server.keys,), daemon=True).start()
+        log(f"protecting {', '.join(sorted(server.zones))} with {server.issuer}")
+    if server.hosts:
+        log(f"serving only {', '.join(p.pattern for p in server.hosts)}")
     server.serve_forever()
 
 

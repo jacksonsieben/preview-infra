@@ -208,6 +208,31 @@ def test_check(key, rotated, stranger):
     check("refresh() reports failure", keys_down.refresh(), False)
 
 
+def test_hosts(key):
+    """The remote host serves PR previews only: every other host is refused first."""
+    keys = pa.Keys(ISSUER + "/cdn-cgi/access/certs", fetch=FakeCerts(key), clock=Clock())
+    hosts = [pa.re.compile(p, pa.re.IGNORECASE) for p in
+             [r"^pr-[0-9]+(-[a-z0-9]+)*\.example\.com$", r"^pr-[0-9]+(-[a-z0-9]+)*\.example\.dev$"]]
+    good = key.token()
+
+    def ask(host, token=None):
+        return pa.check(host, token, ZONES, ISSUER, keys, NOW, hosts)
+
+    check("hosts: a domain preview passes without a token", ask("pr-36-preview.example.com"),
+          (True, "not protected"))
+    check("hosts: case and port do not matter", ask("PR-36-Preview.example.com:80"), (True, "not protected"))
+    check("hosts: a zone preview still needs the token", ask("pr-12.example.dev"),
+          (False, "no Cf-Access-Jwt-Assertion header"))
+    check("hosts: a zone preview with the token", ask("pr-12.example.dev", good), (True, "valid token"))
+    for host in ["main.example.dev", "example.com", "www.example.com", "coolify.example.com",
+                 "pr-.example.com", "pr-x.example.com", "pr-1.evil.com", "pr-1.example.com.evil.com",
+                 "xpr-1.example.com", "pr-1.example.comx", ""]:
+        check(f"hosts: {host or '(no host)'} refused, token or not", ask(host, good),
+              (False, pa.HOST_NOT_SERVED))
+    check("no hosts: every host is served", pa.check("main.example.com", None, ZONES, ISSUER, keys, NOW, []),
+          (True, "not protected"))
+
+
 def test_short_key(directory):
     short = Key(directory, "short", bits=1024)
     keys = pa.Keys(ISSUER + "/cdn-cgi/access/certs", fetch=FakeCerts(short), clock=Clock())
@@ -244,6 +269,18 @@ def test_http(key):
         server.shutdown()
         server.server_close()
 
+    served = pa.serve({"listen": ["127.0.0.1", 0], "issuer": ISSUER, "zones": {},
+                       "hosts": [r"^pr-[0-9]+-preview\.example\.com$"]}, keys=keys)
+    threading.Thread(target=served.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{served.server_address[1]}/"
+    try:
+        check("HTTP hosts: a preview", ask("pr-1-preview.example.com"), (200, b""))
+        check("HTTP hosts: another host", ask("example.com"), (403, pa.NOT_SERVED))
+        check("HTTP hosts: no host (the readiness check)", ask(""), (403, pa.NOT_SERVED))
+    finally:
+        served.shutdown()
+        served.server_close()
+
 
 def main():
     with tempfile.TemporaryDirectory() as directory:
@@ -251,6 +288,7 @@ def main():
         rotated = Key(directory, "kid-2")
         stranger = Key(directory, "stranger")
         test_check(key, rotated, stranger)
+        test_hosts(key)
         test_short_key(directory)
         test_http(key)
     print("all ok")

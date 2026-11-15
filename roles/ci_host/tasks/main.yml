@@ -1,7 +1,8 @@
 ---
 # The base of the remote host (README, Remote host (ci-1)): nothing reachable
-# but through the tailnet, security updates, swap, never idle for Oracle, and
-# Docker for the GitHub Actions runner.
+# but through the tailnet, security updates, swap, never idle for Oracle, the
+# isolation of the PR previews' networks, and Docker for the GitHub Actions
+# runner and the previews.
 #
 # The firewall and sshd accept the tailnet only, so the first tasks make sure
 # this very connection came through it: applied over any other path, the next
@@ -76,6 +77,10 @@
 
 - name: Memory floor
   ansible.builtin.import_tasks: memory_floor.yml
+
+# Before Docker, so the previews' networks never run without it.
+- name: Preview network isolation
+  ansible.builtin.import_tasks: preview_isolation.yml
 
 - name: Docker
   ansible.builtin.import_tasks: docker.yml

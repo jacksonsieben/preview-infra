@@ -1,0 +1,121 @@
+---
+# The settings of the PR previews on ci-1 (roles/ci_previews): its tunnel's
+# routes, the hosts its Traefik serves, the names the preview host keeps,
+# Coolify's key line, and the Traefik file of preview-access there. Offline:
+# no API call, nothing changed, and group_vars/all/local.yml is not read.
+#
+#   ansible-playbook tests/ci_previews_settings.yml
+
+- name: Previews on ci-1
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/defaults.yml
+    - ../roles/ci_previews/defaults/main.yml
+    - ../roles/preview_access/defaults/main.yml
+  tasks:
+    # set_fact wins over vars_files; play vars would not.
+    - name: Settle a setup shaped like production's, with the previews on ci-1
+      ansible.builtin.set_fact:
+        domain: example.com
+        production_hostnames: [example.com, main.example.dev]
+        preview_access_emails: [you@example.com]
+        preview_zones: [{zone: Example.dev}]
+        ci_previews_enabled: true
+        ci_previews_zones: [example.com, example.dev]
+        ci_previews_networks: [myapp, site]
+        ci_previews_coolify_address: 100.101.102.103
+        ci_previews_coolify_key: "  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEx coolify-ci-1\n"
+
+    - name: Check ci-1's tunnel routes
+      ansible.builtin.assert:
+        that: ci_previews_ingress == expected
+        fail_msg: "Routes: {{ ci_previews_ingress }}"
+      vars:
+        expected:
+          - {hostname: "*.example.com", service: "http://127.0.0.1:80"}
+          - {hostname: "*.example.dev", service: "http://127.0.0.1:80"}
+          - {service: "http_status:404"}
+
+    - name: Check the hosts ci-1 serves
+      ansible.builtin.assert:
+        that:
+          - ci_previews_hosts == ['^pr-[0-9]+(-[a-z0-9]+)*\.example\.com$', '^pr-[0-9]+(-[a-z0-9]+)*\.example\.dev$']
+          - "'pr-36-preview.example.com' is match(ci_previews_hosts[0])"
+          - "'pr-12.example.dev' is match(ci_previews_hosts[1])"
+          - "'pr-12-blog.example.dev' is match(ci_previews_hosts[1])"
+          - "'main.example.dev' is not match(ci_previews_hosts[1])"
+          - "'example.com' is not match(ci_previews_hosts[0])"
+          - "'coolify.example.com' is not match(ci_previews_hosts[0])"
+          - "'pr-1.example.com.evil.com' is not match(ci_previews_hosts[0])"
+          - "'pr-1xexample.com' is not match(ci_previews_hosts[0])"
+        fail_msg: "Hosts: {{ ci_previews_hosts }}"
+
+    - name: Check the zones, public and behind Access
+      ansible.builtin.assert:
+        that:
+          - ci_previews_zone_names == ['example.com', 'example.dev']
+          - ci_previews_protected_zones == ['example.dev']
+          - ci_previews_public_zones == ['example.com']
+        fail_msg: "{{ ci_previews_public_zones }} {{ ci_previews_protected_zones }}"
+
+    # Their wildcard moves to ci-1: these must keep a record of their own.
+    - name: Check the names the preview host keeps
+      ansible.builtin.assert:
+        that: ci_previews_kept_records == expected
+        fail_msg: "Kept: {{ ci_previews_kept_records }}"
+      vars:
+        expected:
+          - {name: coolify.example.com, zone: example.com}
+          - {name: example.com, zone: example.com}
+          - {name: main.example.dev, zone: example.dev}
+
+    - name: Check Coolify's key line and how tinker finds ci-1
+      ansible.builtin.assert:
+        that:
+          - ci_previews_coolify_key_line == expected
+          - ci_previews_coolify_server_php == "App\\Models\\Server::where('name', 'ci-1')->firstOrFail()"
+          - ci_previews_docker_networks == ['previews-myapp', 'previews-site']
+        fail_msg: "{{ ci_previews_coolify_key_line }} | {{ ci_previews_coolify_server_php }}"
+      vars:
+        expected: >-
+          from="100.101.102.103",no-agent-forwarding,no-port-forwarding,no-X11-forwarding
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEx preview-infra: Coolify on the preview host
+
+    - name: Check the middlewares of the preview host
+      ansible.builtin.assert:
+        that: preview_access_middlewares == ['preview-access@file']
+        fail_msg: "Middlewares: {{ preview_access_middlewares }}"
+
+    - name: Check the middlewares of ci-1
+      ansible.builtin.assert:
+        that: preview_access_middlewares == ['preview-access@file', 'preview-noindex@file']
+        fail_msg: "Middlewares: {{ preview_access_middlewares }}"
+      vars:
+        preview_access_noindex: true
+
+    - name: Check ci-1's Traefik file
+      ansible.builtin.assert:
+        that:
+          - traefik.http.middlewares['preview-access'].forwardAuth.address == 'http://preview-access:9180/'
+          - traefik.http.middlewares['preview-noindex'].headers.customResponseHeaders['X-Robots-Tag'] == 'noindex, nofollow'
+          - traefik.http.routers['preview-access-probe'].rule
+            == 'Host(`preview-infra-check.example.com`) || Host(`preview-infra-check.example.dev`)'
+        fail_msg: "Traefik: {{ traefik }}"
+      vars:
+        preview_access_noindex: true
+        preview_access_hosts: "{{ ci_previews_hosts }}"
+        preview_access_zones: [example.dev]
+        preview_access_probe_zones: [example.com, example.dev]
+        traefik: "{{ lookup('ansible.builtin.template', '../roles/preview_access/templates/traefik.yaml.j2') | from_yaml }}"
+
+    - name: Check the preview host's Traefik file is as before
+      ansible.builtin.assert:
+        that:
+          - "'preview-noindex' not in traefik.http.middlewares"
+          - traefik.http.routers['preview-access-probe'].rule == 'Host(`preview-infra-check.example.dev`)'
+        fail_msg: "Traefik: {{ traefik }}"
+      vars:
+        preview_access_zones: [example.dev]
+        traefik: "{{ lookup('ansible.builtin.template', '../roles/preview_access/templates/traefik.yaml.j2') | from_yaml }}"
