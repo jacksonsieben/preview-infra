@@ -1,0 +1,55 @@
+---
+# ci_previews_enabled is false: take down what a previous run set up here.
+# The preview host's play points the wildcards back at its own tunnel
+# (cloudflare_tunnel role), so the full playbook is the rollback (README,
+# Previews on ci-1). The Docker networks, and ci-1's tunnel on Cloudflare,
+# stay: remove them by hand if you are done with them.
+
+- name: Look for ci-1's cloudflared
+  ansible.builtin.stat:
+    path: "{{ ci_previews_cloudflared_dir }}/compose.yml"
+  register: ci_previews_cloudflared_compose
+
+- name: Stop ci-1's cloudflared
+  ansible.builtin.command:
+    cmd: docker compose down
+    chdir: "{{ ci_previews_cloudflared_dir }}"
+  changed_when: true
+  when: ci_previews_cloudflared_compose.stat.exists
+
+- name: Remove the tunnel token
+  ansible.builtin.file:
+    path: "{{ ci_previews_cloudflared_dir }}"
+    state: absent
+
+- name: Stop preview-access on ci-1
+  ansible.builtin.include_role:
+    name: preview_access
+  vars:
+    preview_access_wanted: false
+    preview_access_manage_proxy: false
+
+- name: Look for the preview limit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/preview-limit.timer
+  register: ci_previews_limit_timer
+
+- name: Stop the preview limit
+  ansible.builtin.systemd_service:
+    name: preview-limit.timer
+    state: stopped
+    enabled: false
+  when: ci_previews_limit_timer.stat.exists
+
+- name: Take Coolify's root login out of sshd
+  ansible.builtin.blockinfile:
+    path: /etc/ssh/sshd_config
+    marker: "# {mark} preview-infra: Coolify on the preview host"
+    state: absent
+  notify: Reload sshd for Coolify
+
+- name: Take Coolify's key out of root's authorized_keys
+  ansible.builtin.lineinfile:
+    path: /root/.ssh/authorized_keys
+    regexp: ' preview-infra: Coolify on the preview host$'
+    state: absent

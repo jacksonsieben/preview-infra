@@ -1,0 +1,218 @@
+---
+# PR previews on ci-1 (README, Previews on ci-1). The preview host's Coolify
+# builds and runs them here, over SSH through the tailnet; this host publishes
+# them through a tunnel of its own and serves nothing else.
+#
+#   - Coolify logs in as root, with its key, from the preview host only.
+#   - Each app's previews run on a Docker network of their own, which reaches
+#     the internet and nothing else (ci_host, preview_isolation.yml).
+#   - Traefik answers for PR previews only, and checks the Access token of
+#     preview_zones itself (preview_access role, with preview_access_hosts).
+#   - At most ci_previews_max previews run at once (preview-limit), and
+#     unused preview images go daily (preview_cleanup role).
+#
+# Cloudflare's API is called from the controller (delegate_to: localhost):
+# the API token never reaches this host, only the tunnel's own token.
+#
+# With ci_previews_enabled false, a previous setup is taken down instead
+# (tasks/remove.yml).
+
+- name: Set up the previews on ci-1
+  when: ci_previews_enabled | bool
+  block:
+    - name: Check the settings of the previews on ci-1
+      ansible.builtin.assert:
+        that:
+          - ci_previews_zone_names | length > 0
+          - ci_previews_zone_names | difference([domain | lower] + ci_previews_protected_zones) | length == 0
+          - ci_previews_coolify_server is match('^[A-Za-z0-9._-]+$')
+          - ci_previews_coolify_address is match('^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$')
+          - ci_previews_coolify_key | trim is match('^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+=*( .*)?$')
+          - ci_previews_networks | length > 0
+          - ci_previews_networks | reject('match', '^[a-z0-9][a-z0-9-]{0,11}$') | list | length == 0
+          - ci_previews_networks | unique | length == ci_previews_networks | length
+          - ci_previews_max | int >= 1
+          - ci_previews_concurrent_builds | int >= 1
+        fail_msg: >-
+          Set ci_previews_zones (`domain` or zones of preview_zones),
+          ci_previews_coolify_address (the preview host's tailnet IPv4,
+          `tailscale ip -4` there), ci_previews_coolify_key (the public key of
+          ci-1's private key in Coolify), ci_previews_networks (one name per
+          app, a-z, 0-9 and -, at most 12 characters) and ci_previews_max of
+          1 or more (README, Previews on ci-1).
+        quiet: true
+
+    # --- Coolify's access ----------------------------------------------------
+
+    # The key line limits itself to the preview host's address too.
+    - name: Let Coolify's key in as root
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        regexp: ' preview-infra: Coolify on the preview host$'
+        line: "{{ ci_previews_coolify_key_line }}"
+        create: true
+        mode: "0600"
+
+    - name: Find sshd
+      ansible.builtin.shell:
+        cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
+      register: ci_previews_sshd
+      changed_when: false
+
+    # ci_host's drop-in says PermitRootLogin no for everyone. A Match block
+    # runs to the end of the file, so it goes at the end of the main
+    # sshd_config, after every global setting (as on the preview host,
+    # roles/coolify, host_access.yml). AllowUsers (tailnet addresses) still
+    # applies.
+    - name: Allow root logins with a key from the preview host
+      ansible.builtin.blockinfile:
+        path: /etc/ssh/sshd_config
+        marker: "# {mark} preview-infra: Coolify on the preview host"
+        insertafter: EOF
+        block: |
+          Match User root Address {{ ci_previews_coolify_address }}/32
+              PermitRootLogin prohibit-password
+        validate: "{{ ci_previews_sshd.stdout }} -t -f %s"
+      notify: Reload sshd for Coolify
+
+    # --- Docker networks -----------------------------------------------------
+
+    # Coolify creates `coolify` when it validates the server, and its
+    # destinations with `docker network create` only if they are missing, so
+    # the bridge names (pv-<name>, which the isolation rules match) hold.
+    - name: Read the Docker networks
+      ansible.builtin.command: docker network ls --format {% raw %}'{{ .Name }}'{% endraw %}
+      register: ci_previews_existing_networks
+      changed_when: false
+
+    - name: Create Coolify's network
+      ansible.builtin.command: docker network create --attachable coolify
+      changed_when: true
+      when: "'coolify' not in ci_previews_existing_networks.stdout_lines"
+
+    - name: Create the preview networks
+      ansible.builtin.command:
+        argv:
+          - docker
+          - network
+          - create
+          - --driver=bridge
+          - --attachable
+          - --opt=com.docker.network.bridge.name=pv-{{ item }}
+          - previews-{{ item }}
+      loop: "{{ ci_previews_networks }}"
+      changed_when: true
+      when: ('previews-' ~ item) not in ci_previews_existing_networks.stdout_lines
+
+    - name: Read the preview networks' bridges
+      ansible.builtin.command:
+        argv:
+          - docker
+          - network
+          - inspect
+          - --format
+          - "{% raw %}{{ index .Options \"com.docker.network.bridge.name\" }}{% endraw %}"
+          - previews-{{ item }}
+      loop: "{{ ci_previews_networks }}"
+      register: ci_previews_bridges
+      changed_when: false
+
+    # One made by hand (by Coolify, for one) has a br-<id> bridge that the
+    # isolation rules do not match.
+    - name: Check the preview networks' bridges
+      ansible.builtin.assert:
+        that: item.stdout == 'pv-' ~ item.item
+        fail_msg: >-
+          previews-{{ item.item }} is on the bridge '{{ item.stdout }}', not
+          pv-{{ item.item }}: the isolation rules would not cover it. Remove it
+          (docker network rm previews-{{ item.item }}, with nothing on it) and
+          rerun.
+        quiet: true
+      loop: "{{ ci_previews_bridges.results }}"
+      loop_control:
+        label: previews-{{ item.item }}
+
+    # --- the tunnel ----------------------------------------------------------
+
+    - name: Cloudflare tunnel
+      ansible.builtin.include_tasks: tunnel.yml
+
+    # --- preview-access ------------------------------------------------------
+
+    # Traefik here answers for PR previews only, checks the Access token of
+    # preview_zones itself, and tells search engines to stay away.
+    - name: Run preview-access on ci-1
+      ansible.builtin.include_role:
+        name: preview_access
+      vars:
+        preview_access_wanted: true
+        preview_access_hosts: "{{ ci_previews_hosts }}"
+        preview_access_probe_zones: "{{ (ci_previews_protected_zones + ci_previews_zone_names) | unique | sort }}"
+        preview_access_noindex: true
+        preview_access_manage_proxy: false
+        preview_access_probe: "{{ ci_previews_probe }}"
+
+    # --- limits and cleanup --------------------------------------------------
+
+    - name: Install preview-limit
+      ansible.builtin.copy:
+        src: preview-limit
+        dest: /usr/local/bin/preview-limit
+        mode: "0755"
+
+    - name: Install the preview-limit service and timer
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop:
+        - preview-limit.service
+        - preview-limit.timer
+      notify: Reload systemd for the previews
+
+    - name: Apply systemd changes before starting the preview limit
+      ansible.builtin.meta: flush_handlers
+
+    - name: Check the number of previews every minute
+      ansible.builtin.systemd_service:
+        name: preview-limit.timer
+        enabled: true
+        state: started
+
+    # The image cleanup of the preview host. Coolify's own cleanup of this
+    # server is set from the preview host (coolify.yml).
+    - name: Remove unused preview images daily
+      ansible.builtin.include_role:
+        name: preview_cleanup
+      vars:
+        preview_cleanup_coolify_settings: false
+
+    # --- from the internet ---------------------------------------------------
+
+    # A name on a public zone that is no PR preview: through Cloudflare and
+    # this host's tunnel, Traefik refuses it with preview-access's own
+    # message, so the wildcard reaches this host and nothing else is served.
+    # The zones behind Access are checked by the preview host's play.
+    - name: Check that the public zones reach ci-1 and nothing but previews
+      ansible.builtin.uri:
+        url: "https://{{ ci_previews_probe }}.{{ item }}/"
+        status_code: 403
+        return_content: true
+        follow_redirects: none
+      delegate_to: localhost
+      become: false
+      loop: "{{ ci_previews_public_zones }}"
+      loop_control:
+        label: "https://{{ ci_previews_probe }}.{{ item }}/"
+      register: ci_previews_public_probe
+      failed_when: >-
+        ci_previews_public_probe.status | default(0) != 403
+        or 'serves pull request previews only' not in ci_previews_public_probe.content | default('')
+      until: ci_previews_public_probe is not failed
+      retries: 12
+      delay: 10
+      when: preview_access_proxy.stdout | default('') | length > 0
+
+- name: Take the previews on ci-1 down
+  ansible.builtin.include_tasks: remove.yml
+  when: not (ci_previews_enabled | bool)

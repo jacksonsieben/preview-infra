@@ -364,6 +364,35 @@ def main():
         check(not [r for r in api.requests[before:] if r[0] == "POST" and r[1].endswith("/start")],
               "and deploys nothing")
 
+        print("# 10. a second app of the repository, for its previews on ci-1")
+        on_ci = api.add_app("you/myapp", "myapp-previews")
+        ci_app = next(a for a in api.apps if a["uuid"] == on_ci)
+        ci_app.setdefault("settings", {})["is_auto_deploy_enabled"] = True
+
+        def ci_entry(**more):
+            return {"name": "myapp-previews", "repository": "you/myapp", "zone": "example.dev", "port": 8740,
+                    "healthcheck_path": "/health", "server": "ci-1", "network": "myapp", **more}
+
+        before = len(api.requests)
+        rc, out = run([site()], [preview_app(previews=False), ci_entry(previews=True, memory="768m")])
+        check(rc == 0 and ci_app["settings"]["is_auto_deploy_enabled"] is False
+              and ci_app["settings"]["is_preview_deployments_enabled"] is True,
+              "Auto Deploy off and previews on, on ci-1", out)
+        check((ci_app.get("limits_cpus"), ci_app.get("limits_memory"), ci_app.get("limits_memory_swap"))
+              == ("1", "768m", "768m"), "each preview within its limits, without swap "
+              f"({ci_app.get('limits_cpus')}, {ci_app.get('limits_memory')}, {ci_app.get('limits_memory_swap')})")
+        app = next(a for a in api.apps if a["uuid"] == myapp)
+        check(app["settings"]["is_preview_deployments_enabled"] is False and "limits_memory" not in app,
+              "the app on the preview host keeps its previews off and gets no limits")
+        check(not [r for r in api.requests[before:] if r[0] == "POST" and r[1].endswith("/start")],
+              "and nothing is deployed")
+        before = len(api.requests)
+        rc, out = run([site()], [preview_app(previews=False), ci_entry(previews=True, memory="768m")])
+        check(rc == 0 and not [r for r in api.requests[before:] if r[0] != "GET"], "a second run writes nothing", out)
+        rc, out = run([site()], [preview_app(previews=False), ci_entry(cpus="0.5")])
+        check(rc == 0 and (ci_app["limits_cpus"], ci_app["limits_memory"]) == ("0.5", "1g"),
+              "the defaults of ci_previews_cpus and _memory, and a limit of its own", out)
+
     server.shutdown()
     print(f"\n{len(FAILED)} failed" if FAILED else "\nall passed")
     return 1 if FAILED else 0

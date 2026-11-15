@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""preview-limit: keep at most N PR previews running on this host.
+
+    preview-limit <N>
+
+Coolify labels every container it deploys: coolify.type=application,
+coolify.applicationId, and coolify.pullRequestId, which is 0 for an app's own
+deployment and the PR number for a preview. A preview is one application and
+one PR number, whatever its containers. When more than N previews run, this
+stops the containers of those started longest ago, so the newest N keep
+running. Pushing to a stopped preview's PR deploys it again, and so does
+Redeploy in Coolify. Coolify's containers restart `unless-stopped`, so a
+stopped preview stays stopped, also across reboots.
+
+Nothing that is not a PR preview is ever stopped. Run every minute by
+preview-limit.timer; journalctl -u preview-limit shows what it stopped.
+"""
+import json
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+STARTED = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)$")
+
+
+def docker(*args):
+    return subprocess.run(["docker", *args], check=True, capture_output=True, text=True).stdout
+
+
+def started_at(value):
+    """Seconds since the epoch of Docker's StartedAt (RFC 3339, nanoseconds)."""
+    match = STARTED.match(value or "")
+    if not match:
+        return 0.0
+    seconds, fraction, zone = match.groups()
+    zone = "+00:00" if zone == "Z" else zone
+    moment = datetime.fromisoformat(seconds + zone).astimezone(timezone.utc)
+    return moment.timestamp() + float("0" + (fraction or ""))
+
+
+def running_previews(containers):
+    """{(application id, PR number): {"started": seconds, "containers": [names]}}."""
+    previews = {}
+    for container in containers:
+        labels = (container.get("Config") or {}).get("Labels") or {}
+        if labels.get("coolify.type") != "application":
+            continue
+        pull_request = labels.get("coolify.pullRequestId", "0").strip()
+        if not pull_request.isdigit() or int(pull_request) == 0:
+            continue
+        key = (labels.get("coolify.applicationId", "?"), int(pull_request))
+        preview = previews.setdefault(key, {"started": 0.0, "containers": []})
+        preview["started"] = max(preview["started"], started_at(container["State"].get("StartedAt")))
+        preview["containers"].append(container["Name"].lstrip("/"))
+    return previews
+
+
+def over_the_limit(previews, limit):
+    """The previews to stop: all but the `limit` started last."""
+    newest_first = sorted(previews.items(), key=lambda item: (item[1]["started"], item[0]), reverse=True)
+    return newest_first[limit:]
+
+
+def main():
+    limit = int(sys.argv[1])
+    if limit < 1:
+        sys.exit("preview-limit: the limit must be 1 or more")
+    ids = docker("ps", "--quiet", "--no-trunc", "--filter", "label=coolify.pullRequestId").split()
+    if not ids:
+        return
+    previews = running_previews(json.loads(docker("inspect", *ids)))
+    for (application, pull_request), preview in over_the_limit(previews, limit):
+        names = sorted(preview["containers"])
+        print(f"stopping the preview of PR {pull_request} (application {application}: "
+              f"{', '.join(names)}): more than {limit} previews running", flush=True)
+        docker("stop", *names)
+
+
+if __name__ == "__main__":
+    main()

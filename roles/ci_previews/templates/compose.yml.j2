@@ -1,0 +1,12 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# ci-1's own tunnel ({{ ci_previews_tunnel_name }}): the PR previews of
+# {{ ci_previews_zone_names | join(', ') }}, through Coolify's Traefik on 127.0.0.1:80.
+services:
+  cloudflared:
+    image: {{ ci_previews_cloudflared_image }}
+    command: tunnel --no-autoupdate run
+    env_file: .env
+    # Host network: Traefik's port is published on 127.0.0.1 only.
+    network_mode: host
+    restart: unless-stopped

@@ -47,3 +47,9 @@ jobs:
         run: python3 tests/memory_floor.py
       - name: Preview access check
         run: python3 tests/preview_access.py
+      - name: Previews on ci-1, settings
+        run: ansible-playbook tests/ci_previews_settings.yml
+      - name: Previews on ci-1, in Coolify
+        run: ansible-playbook tests/ci_previews_coolify.yml
+      - name: Preview limit
+        run: python3 tests/preview_limit.py

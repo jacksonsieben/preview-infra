@@ -1,0 +1,84 @@
+---
+# On the preview host: the settings Coolify keeps in its database for the
+# server ci-1 (README, Previews on ci-1). ci-1 has no Coolify of its own; the
+# preview host's manages it over SSH, and changes its proxy from here, with
+# the same tasks as for this host:
+#
+#   - one build at a time there (ci_previews_concurrent_builds);
+#   - its Traefik on 127.0.0.1 only, where ci-1's cloudflared reaches it;
+#   - every request through preview-access, and a noindex header, on its
+#     entrypoints;
+#   - Coolify's own cleanup only as an emergency: ci-1 also runs the CI.
+#
+# ci-1 is added to Coolify by hand. Until it is, this only says so.
+
+- name: Look up ci-1 in Coolify
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        echo App\Models\Server::where('name', '{{ ci_previews_coolify_server }}')->exists() ? 'found' : 'missing';
+  register: ci_previews_coolify_lookup
+  changed_when: false
+  failed_when: >-
+    ci_previews_coolify_lookup.rc != 0
+    or ci_previews_coolify_lookup.stdout_lines | select('in', ['found', 'missing']) | list | length == 0
+
+- name: Report ci-1 missing from Coolify
+  ansible.builtin.debug:
+    msg: >-
+      Coolify has no server named '{{ ci_previews_coolify_server }}' yet. Add
+      it (README, Previews on ci-1: Servers → + Add, then Validate) and rerun
+      the playbook: its proxy gets the Access check here.
+  when: "'found' not in ci_previews_coolify_lookup.stdout_lines"
+
+- name: Configure ci-1 in Coolify
+  when: "'found' in ci_previews_coolify_lookup.stdout_lines"
+  block:
+    # A fact, so the roles included below see it whatever their own vars.
+    - name: Remember how tinker finds ci-1
+      ansible.builtin.set_fact:
+        ci_previews_server: "{{ ci_previews_coolify_server_php }}"
+
+    - name: Limit the builds Coolify runs at once on ci-1
+      ansible.builtin.include_role:
+        name: coolify
+        tasks_from: build_limit
+      vars:
+        coolify_server_php: "{{ ci_previews_server }}"
+        coolify_concurrent_builds: "{{ ci_previews_concurrent_builds | int }}"
+
+    - name: Publish ci-1's proxy on loopback only
+      ansible.builtin.include_role:
+        name: coolify
+        tasks_from: proxy_ports
+      vars:
+        coolify_server_php: "{{ ci_previews_server }}"
+
+    # A shared host: ci-1 also runs the CI, whose images Coolify's daily
+    # forced cleanup would remove.
+    - name: Set Coolify's own Docker cleanup for ci-1
+      ansible.builtin.include_role:
+        name: preview_cleanup
+        tasks_from: coolify_settings
+      vars:
+        coolify_server_php: "{{ ci_previews_server }}"
+        preview_host_dedicated: false
+
+    # preview-access itself runs on ci-1 (ci play, roles/ci_previews). While
+    # it is not there yet, Traefik there answers 500 to everything: closed,
+    # not open.
+    - name: Run every request on ci-1 through preview-access
+      ansible.builtin.include_role:
+        name: preview_access
+        tasks_from: entrypoints
+      vars:
+        preview_access_on: true
+        preview_access_server_php: "{{ ci_previews_server }}"
+        preview_access_noindex: true
