@@ -15,3 +15,9 @@ preview_cleanup_schedule: "*-*-* 04:00"
 # the disk passes the threshold. A dedicated host keeps Coolify's defaults.
 preview_host_dedicated: false
 coolify_cleanup_threshold_on_shared_host: 95
+
+# Whether the role sets Coolify's own cleanup (tasks/coolify_settings.yml)
+# through the Coolify on this host. The remote host has none: the preview host
+# sets it for that server (roles/ci_previews, coolify.yml).
+preview_cleanup_coolify_settings: true
+coolify_server_php: 'App\Models\Server::find(0)'

@@ -1,0 +1,25 @@
+---
+# Coolify keeps these in its database, so they go through its own models, for
+# the server in coolify_server_php (this host, or the remote one from
+# roles/ci_previews). The command prints "changed" only when it had to write
+# something.
+- name: Set Coolify's own Docker cleanup for the server
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        $s = ({{ coolify_server_php }})->settings;
+        $s->force_docker_cleanup = {{ 'true' if preview_host_dedicated else 'false' }};
+        {% if not preview_host_dedicated %}
+        $s->docker_cleanup_threshold = {{ coolify_cleanup_threshold_on_shared_host }};
+        {% endif %}
+        echo $s->isDirty() ? 'changed' : 'ok';
+        $s->save();
+  register: coolify_cleanup_settings
+  changed_when: "'changed' in coolify_cleanup_settings.stdout"

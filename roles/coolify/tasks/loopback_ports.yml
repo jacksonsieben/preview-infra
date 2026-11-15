@@ -12,37 +12,9 @@
     mode: "0644"
   notify: Recreate Coolify
 
-# Coolify keeps the proxy's compose file in its database and rewrites the file
-# on disk from there, so the change goes through its own actions. Also drops
-# the Traefik dashboard on host port 8080, which nothing here uses and which
-# collides with other local services.
+# The proxy's own ports (80, 443), through Coolify.
 - name: Publish the Coolify proxy ports on loopback only
-  ansible.builtin.command:
-    argv:
-      - docker
-      - exec
-      - coolify
-      - php
-      - /var/www/html/artisan
-      - tinker
-      - --execute
-      - >-
-        $s = App\Models\Server::find(0);
-        $c = App\Actions\Proxy\GetProxyConfiguration::run($s);
-        $n = preg_replace(
-          ['/^(\s*- )\x27(80:80|443:443|443:443\/udp)\x27$/m', '/^\s*- \x278080:8080\x27\n/m'],
-          ["\$1'127.0.0.1:\$2'", ''],
-          $c);
-        if ($n === $c) { echo 'ok'; } else {
-          App\Actions\Proxy\SaveProxyConfiguration::run($s, $n);
-          App\Actions\Proxy\StartProxy::run($s, async: false, force: true);
-          echo 'changed';
-        }
-  register: coolify_proxy_ports
-  changed_when: "'changed' in coolify_proxy_ports.stdout"
-  failed_when: >-
-    coolify_proxy_ports.rc != 0
-    or coolify_proxy_ports.stdout_lines | select('in', ['ok', 'changed']) | list | length == 0
+  ansible.builtin.include_tasks: proxy_ports.yml
 
 # Coolify's Start Proxy button refuses while anything listens on 443, and
 # Tailscale Serve holds 443 on the tailnet address for the dashboard. Traefik

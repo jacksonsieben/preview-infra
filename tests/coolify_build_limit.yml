@@ -10,6 +10,7 @@
   gather_facts: false
   vars:
     limit_tasks: "{{ playbook_dir }}/../roles/coolify/tasks/build_limit.yml"
+    coolify_server_php: 'App\Models\Server::find(0)'
   tasks:
     - name: Read the defaults
       ansible.builtin.include_vars:
