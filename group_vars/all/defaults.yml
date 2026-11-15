@@ -55,10 +55,13 @@ coolify_apps: []
 coolify_concurrent_builds: 1
 
 # Where the Coolify dashboard is reachable:
-#   tailscale  only from your tailnet, at https://<machine>.<tailnet>.ts.net.
+#   tailscale  only from your tailnet, at https://<coolify_dashboard_hostname>.
 #              The tunnel serves just coolify.<domain>/webhooks/ for GitHub.
 #   public     at coolify.<domain> through the tunnel, behind the login only.
 coolify_dashboard: tailscale
+# With coolify_dashboard tailscale: the dashboard's name, on a tailnet-only
+# zone (README, Step 3), e.g. coolify.example.dev.
+coolify_dashboard_hostname: ""
 
 # ---------------------------------------------------------------------------
 # More zones
