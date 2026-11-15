@@ -26,6 +26,8 @@ preview_wildcard: "*.{{ domain }}"
 # A name may be on `domain` or on a zone of preview_zones (still behind its
 # Access login). On a zone whose previews moved to ci-1 (ci_previews_zones),
 # list here everything this host still serves there: main.<zone>, for one.
+# On a tailnet-only zone (preview_zones, `tailnet: true`) a name gets no
+# tunnel route: an unproxied A record to this host's tailnet address instead.
 production_hostnames: []
 
 # ---------------------------------------------------------------------------
@@ -55,10 +57,23 @@ coolify_apps: []
 coolify_concurrent_builds: 1
 
 # Where the Coolify dashboard is reachable:
-#   tailscale  only from your tailnet, at https://<machine>.<tailnet>.ts.net.
+#   tailscale  only from your tailnet, at https://<coolify_dashboard_hostname>.
 #              The tunnel serves just coolify.<domain>/webhooks/ for GitHub.
 #   public     at coolify.<domain> through the tunnel, behind the login only.
 coolify_dashboard: tailscale
+
+# With coolify_dashboard tailscale: the dashboard's name, on a tailnet-only
+# zone of preview_zones (README, Step 3), e.g. coolify.example.dev. It gets an
+# unproxied A record to this host's tailnet address; Tailscale Serve hands
+# port 443 there to Traefik, which serves the dashboard with a Let's Encrypt
+# certificate it gets through Cloudflare DNS-01.
+coolify_dashboard_hostname: ""
+
+# The Cloudflare API token Traefik on this host uses for DNS-01, in a file you
+# put there yourself (README, Tailnet-only zones): root-owned, mode 0600, the
+# token alone. The playbook checks that it exists and never reads it. Traefik
+# gets it mounted read-only. Needed with coolify_dashboard tailscale.
+coolify_dns_token_file: /etc/preview-infra/cloudflare-dns-token
 
 # ---------------------------------------------------------------------------
 # More zones
@@ -72,15 +87,33 @@ coolify_dashboard: tailscale
 #     - zone: example.dev
 #       wildcard: "*.example.dev"        # optional, this is the default
 #       access_emails: [you@example.com] # optional, default preview_access_emails
+#       tailnet: false                   # optional, see below
 #
 # The wildcard stays one level deep (pr-12.example.dev), for the same
 # certificate reason as above. Coolify's own hostname stays on `domain`.
+#
+# A zone with `tailnet: true` is served on the tailnet only (README,
+# Tailnet-only zones): no tunnel route and no Access login, but unproxied A
+# records to the tailnet address of the host that serves each name, and
+# certificates through Cloudflare DNS-01. Whoever is on the tailnet (and the
+# ACL lets in) opens it; nobody else does. access_emails is not needed then.
 # ---------------------------------------------------------------------------
 preview_zones: []
 
+# The zones of preview_zones served on the tailnet only, and those behind
+# Cloudflare Access. Not settings: they follow from preview_zones.
+preview_tailnet_zones: >-
+  {%- set out = [] -%}
+  {%- for z in preview_zones if z.tailnet | default(false) | bool -%}
+  {%- set _ = out.append(z.zone | default('') | lower) -%}
+  {%- endfor -%}
+  {{ out }}
+preview_protected_zones: >-
+  {{ preview_zones | map(attribute='zone', default='') | map('lower') | difference(preview_tailnet_zones) }}
+
 # Who may open the previews on preview_zones (Cloudflare Access, one-time PIN
-# by e-mail). Required for every zone in preview_zones: there is no open
-# preview.
+# by e-mail). Required for every zone in preview_zones but the tailnet-only
+# ones: there is no open preview.
 preview_access_emails: []
 
 # How long a Cloudflare Access login lasts before it asks again.
@@ -290,7 +323,19 @@ ci_previews_enabled: false
 # pr-<n>-<name>.<zone>): any other name gets 403. Whatever else the preview
 # host serves on such a zone goes in production_hostnames first, which keeps
 # a route and a DNS record of its own here.
+#
+# On a tailnet-only zone (preview_zones, `tailnet: true`) ci-1 uses no tunnel:
+# the wildcard is an unproxied A record to ci-1's tailnet address, Tailscale
+# Serve hands port 443 there to Traefik, and Traefik serves a *.<zone>
+# certificate it gets through Cloudflare DNS-01 (ci_previews_dns_token_file).
+# With only such zones, ci-1 runs no cloudflared at all.
 ci_previews_zones: []
+
+# ci-1's own Cloudflare API token for DNS-01, restricted to its tailnet-only
+# zones, in a file you put on ci-1 yourself (README, Tailnet-only zones):
+# root-owned, mode 0600, the token alone. The playbook checks that it exists
+# and never reads it. Needed when ci_previews_zones has a tailnet-only zone.
+ci_previews_dns_token_file: /etc/preview-infra/cloudflare-dns-token
 
 # The hosts ci-1 serves on each of those zones: this regular expression,
 # followed by the zone.

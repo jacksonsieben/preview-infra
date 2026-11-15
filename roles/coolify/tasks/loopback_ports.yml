@@ -17,8 +17,9 @@
   ansible.builtin.include_tasks: proxy_ports.yml
 
 # Coolify's Start Proxy button refuses while anything listens on 443, and
-# Tailscale Serve holds 443 on the tailnet address for the dashboard. Traefik
-# binds 127.0.0.1 (above), so the two don't collide: start it past the check.
+# Tailscale Serve holds 443 on the tailnet address, which it forwards to
+# Traefik (tailscale_dashboard role). Traefik binds 127.0.0.1 (above), so the
+# two don't collide: start it past the check.
 # Once running, Docker restarts it on boot.
 - name: Check whether the Coolify proxy is running
   ansible.builtin.command: docker ps --quiet --filter name=^coolify-proxy$ --filter status=running

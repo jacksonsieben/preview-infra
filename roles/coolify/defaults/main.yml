@@ -11,3 +11,73 @@ coolify_supported_os: [arch, ubuntu, debian, raspbian, centos, fedora, rhel, ol,
 # The Coolify server that build_limit.yml and proxy_ports.yml change, as PHP:
 # this host. roles/ci_previews passes the remote host's.
 coolify_server_php: 'App\Models\Server::find(0)'
+
+# --- Traefik's certificates through Cloudflare DNS-01 (proxy_dns01.yml) -----
+#
+# Traefik is reached on 127.0.0.1 only (cloudflared, Tailscale Serve), so
+# Let's Encrypt's HTTP challenge can't reach it: its `letsencrypt` resolver
+# uses Cloudflare DNS-01 instead, with an API token from a file the operator
+# puts on the host. The file is mounted read-only into Traefik at
+# coolify_proxy_dns_secret and read there through CF_DNS_API_TOKEN_FILE; the
+# playbook never reads it.
+
+# The file on the host, and the host it is on (the remote host's is passed by
+# roles/ci_previews).
+coolify_proxy_dns_token_file: "{{ coolify_dns_token_file }}"
+coolify_proxy_host: "{{ inventory_hostname }}"
+coolify_proxy_dns_secret: /run/secrets/cloudflare-dns-token
+
+# Zones whose certificate for <zone> and *.<zone> Traefik gets up front, on
+# its https entrypoint, so every PR preview there uses it and none asks for
+# its own. Here: the tailnet-only zones whose previews stay on this host
+# (ci-1's are passed by roles/ci_previews). Empty: one certificate per name,
+# as Coolify's routers ask.
+coolify_proxy_wildcards: >-
+  {{ preview_tailnet_zones
+     | reject('in', ci_previews_zones | map('lower') | list if ci_previews_enabled | bool else [])
+     | list }}
+
+# Flags taken out of the proxy's command, whatever their value: every
+# challenge of the `letsencrypt` resolver (httpchallenge.entrypoint included:
+# in Traefik 3 it turns the HTTP challenge back on) and the https
+# entrypoint's TLS settings, which coolify_proxy_dns_flags sets again.
+coolify_proxy_dns_dropped: >-
+  ^--certificatesresolvers\.letsencrypt\.acme\.(httpchallenge|tlschallenge|dnschallenge)|^--entrypoints\.https\.http\.tls\.
+
+coolify_proxy_dns_flags: >-
+  {%- set flags = ['--certificatesresolvers.letsencrypt.acme.dnschallenge=true',
+                   '--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare'] -%}
+  {%- if coolify_proxy_wildcards | length > 0 -%}
+  {%- set _ = flags.append('--entrypoints.https.http.tls.certresolver=letsencrypt') -%}
+  {%- for zone in coolify_proxy_wildcards -%}
+  {%- set _ = flags.append('--entrypoints.https.http.tls.domains[' ~ loop.index0 ~ '].main=' ~ zone) -%}
+  {%- set _ = flags.append('--entrypoints.https.http.tls.domains[' ~ loop.index0 ~ '].sans=*.' ~ zone) -%}
+  {%- endfor -%}
+  {%- endif -%}
+  {{ flags }}
+
+# coolify_proxy_current (the proxy's compose file, parsed) with DNS-01: the
+# flags above, the token file mounted, and CF_DNS_API_TOKEN_FILE pointing at
+# it. A CF_DNS_API_TOKEN written into the configuration by hand goes, so the
+# token is only in the file. Everything else stays as it is.
+coolify_proxy_dns01_config: >-
+  {%- set svc = coolify_proxy_current.services.traefik -%}
+  {%- set env_in = svc.environment | default([], true) -%}
+  {%- set env = [] -%}
+  {%- for e in (env_in | dict2items if env_in is mapping else env_in) -%}
+  {%- set line = (e.key ~ ('' if e.value is none else '=' ~ e.value)) if e is mapping else e | string -%}
+  {%- if line is not match('CF_DNS_API_TOKEN(_FILE)?(=|$)') -%}
+  {%- set _ = env.append(line) -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {%- set _ = env.append('CF_DNS_API_TOKEN_FILE=' ~ coolify_proxy_dns_secret) -%}
+  {%- set volumes = [] -%}
+  {%- for v in svc.volumes | default([], true) -%}
+  {%- set target = v.target | default('') if v is mapping else (v | string).split(':')[1:2] | join -%}
+  {%- if target != coolify_proxy_dns_secret -%}
+  {%- set _ = volumes.append(v) -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {%- set _ = volumes.append(coolify_proxy_dns_token_file ~ ':' ~ coolify_proxy_dns_secret ~ ':ro') -%}
+  {%- set command = svc.command | default([], true) | reject('match', coolify_proxy_dns_dropped) | list + coolify_proxy_dns_flags -%}
+  {{ coolify_proxy_current | combine({'services': {'traefik': svc | combine({'command': command, 'environment': env, 'volumes': volumes})}}, recursive=true) }}

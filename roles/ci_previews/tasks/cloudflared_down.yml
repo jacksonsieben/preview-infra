@@ -1,0 +1,21 @@
+---
+# Stops ci-1's cloudflared and removes its tunnel token: with the previews
+# off (remove.yml), or with only tailnet-only zones (tunnel.yml). ci-1's
+# tunnel on Cloudflare stays: remove it by hand if you are done with it.
+
+- name: Look for ci-1's cloudflared
+  ansible.builtin.stat:
+    path: "{{ ci_previews_cloudflared_dir }}/compose.yml"
+  register: ci_previews_cloudflared_compose
+
+- name: Stop ci-1's cloudflared
+  ansible.builtin.command:
+    cmd: docker compose down
+    chdir: "{{ ci_previews_cloudflared_dir }}"
+  changed_when: true
+  when: ci_previews_cloudflared_compose.stat.exists
+
+- name: Remove the tunnel token
+  ansible.builtin.file:
+    path: "{{ ci_previews_cloudflared_dir }}"
+    state: absent

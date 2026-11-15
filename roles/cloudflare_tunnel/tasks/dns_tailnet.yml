@@ -1,0 +1,48 @@
+---
+# Ensures one unproxied (grey) A record `dns_name` -> `dns_address`, a tailnet
+# address, in the zone `dns_zone_id`. It replaces any record the name had (a
+# CNAME to a tunnel, for one). Cloudflare only answers with the address:
+# nothing goes through its proxy, and only the tailnet reaches it. ci-1's
+# wildcards get theirs in roles/ci_previews (tunnel.yml).
+
+- name: "Look up the DNS record for {{ dns_name }}"
+  ansible.builtin.uri:
+    url: "{{ cloudflare_api }}/zones/{{ dns_zone_id }}/dns_records?name={{ dns_name | urlencode }}"
+    headers:
+      Authorization: "Bearer {{ cloudflare_api_token }}"
+  register: dns_tailnet_lookup
+
+- name: "Check that {{ dns_name }} has one record at most"
+  ansible.builtin.assert:
+    that:
+      - dns_address is match('^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$')
+      - dns_tailnet_lookup.json.result | length <= 1
+    fail_msg: >-
+      {{ dns_name }} must point at a tailnet address (got '{{ dns_address }}')
+      and have one DNS record at most (it has
+      {{ dns_tailnet_lookup.json.result | length }}): remove the others in
+      Cloudflare's dashboard and rerun.
+    quiet: true
+
+- name: "Point {{ dns_name }} at {{ dns_address }}"
+  ansible.builtin.uri:
+    url: >-
+      {{ cloudflare_api }}/zones/{{ dns_zone_id }}/dns_records{{
+         '/' ~ dns_tailnet_lookup.json.result[0].id if dns_tailnet_lookup.json.result else '' }}
+    method: "{{ 'PUT' if dns_tailnet_lookup.json.result else 'POST' }}"
+    headers:
+      Authorization: "Bearer {{ cloudflare_api_token }}"
+    body_format: json
+    body:
+      type: A
+      name: "{{ dns_name }}"
+      content: "{{ dns_address }}"
+      proxied: false
+      ttl: 1
+      comment: "{{ dns_comment | default('Managed by preview-infra (tailnet only)') }}"
+  changed_when: true
+  when: >-
+    not dns_tailnet_lookup.json.result
+    or dns_tailnet_lookup.json.result[0].type != 'A'
+    or dns_tailnet_lookup.json.result[0].content != dns_address
+    or dns_tailnet_lookup.json.result[0].proxied

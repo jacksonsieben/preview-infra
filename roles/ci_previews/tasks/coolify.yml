@@ -5,7 +5,10 @@
 # the same tasks as for this host:
 #
 #   - one build at a time there (ci_previews_concurrent_builds);
-#   - its Traefik on 127.0.0.1 only, where ci-1's cloudflared reaches it;
+#   - its Traefik on 127.0.0.1 only, where ci-1's cloudflared or Tailscale
+#     Serve reaches it;
+#   - with tailnet-only zones, its certificates through Cloudflare DNS-01:
+#     one for <zone> and *.<zone> each, with ci-1's own token;
 #   - every request through preview-access, and a noindex header, on its
 #     entrypoints;
 #   - Coolify's own cleanup only as an emergency: ci-1 also runs the CI.
@@ -60,6 +63,19 @@
         tasks_from: proxy_ports
       vars:
         coolify_server_php: "{{ ci_previews_server }}"
+
+    # The token file is on ci-1 (ci_previews_dns_token_file), checked there
+    # before Coolify mounts it.
+    - name: Give ci-1's Traefik its certificates through Cloudflare DNS-01
+      ansible.builtin.include_role:
+        name: coolify
+        tasks_from: proxy_dns01
+      vars:
+        coolify_server_php: "{{ ci_previews_server }}"
+        coolify_proxy_host: "{{ ci_previews_host }}"
+        coolify_proxy_dns_token_file: "{{ ci_previews_dns_token_file }}"
+        coolify_proxy_wildcards: "{{ ci_previews_tailnet_zones }}"
+      when: ci_previews_tailnet_zones | length > 0
 
     # A shared host: ci-1 also runs the CI, whose images Coolify's daily
     # forced cleanup would remove.

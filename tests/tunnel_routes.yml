@@ -93,7 +93,7 @@
       ansible.builtin.assert:
         that:
           - cloudflare_tunnel_dns_names == ['coolify.example.com', 'example.com', 'main.example.dev']
-          - "cloudflare_tunnel_dns_zones == {'coolify.example.com': 'example.com', 'example.com': 'example.com', 'main.example.dev': 'example.dev'}"
+          - "cloudflare_tunnel_dns_zones == {'coolify.example.com': 'example.com', '*.example.com': 'example.com', 'example.com': 'example.com', 'main.example.dev': 'example.dev'}"
           # The Access application of the zone stays, for both hosts.
           - cloudflare_extra_zones | map(attribute='zone') | list == ['example.dev']
         fail_msg: "DNS: {{ cloudflare_tunnel_dns_names }}, zones {{ cloudflare_tunnel_dns_zones }}"
@@ -135,3 +135,62 @@
           - cloudflare_tunnel_dns_zones['badexample.dev'] == ''
           - cloudflare_tunnel_dns_zones['example.com'] == 'example.com'
         fail_msg: "Zones: {{ cloudflare_tunnel_dns_zones }}"
+
+    # A tailnet-only zone (README, Tailnet-only zones): its names get an
+    # unproxied A record to a tailnet address, no route and no Access. Shaped
+    # like a dashboard and main.<zone> on the preview host, and the zone's
+    # PR previews on ci-1.
+    - name: Make the second zone tailnet-only, its previews on ci-1
+      ansible.builtin.set_fact:
+        preview_zones: [{zone: Example.dev, tailnet: true}]
+        ci_previews_enabled: true
+        ci_previews_zones: [example.dev]
+        production_hostnames: [main.example.dev]
+        coolify_dashboard_hostname: coolify.example.dev
+
+    - name: Check the preview host with a tailnet-only zone
+      ansible.builtin.assert:
+        that:
+          - preview_tailnet_zones == ['example.dev']
+          - preview_protected_zones == []
+          - cloudflare_access_zones == []
+          - cloudflare_local_zones == []
+          - cloudflare_tunnel_ingress == expected
+          - cloudflare_tunnel_dns_names == ['coolify.example.com', '*.example.com']
+          - cloudflare_tailnet_names | map(attribute='name') | list == ['main.example.dev', 'coolify.example.dev']
+          - cloudflare_tailnet_names | map(attribute='zone') | unique == ['example.dev']
+        fail_msg: >-
+          Routes: {{ cloudflare_tunnel_ingress }}. DNS: {{ cloudflare_tunnel_dns_names }}.
+          Tailnet: {{ cloudflare_tailnet_names }}. Access: {{ cloudflare_access_zones }}
+      vars:
+        expected:
+          - {hostname: coolify.example.com, path: ^/webhooks/, service: "http://127.0.0.1:8000"}
+          - {hostname: coolify.example.com, service: "http_status:404"}
+          - {hostname: "*.example.com", service: "http://127.0.0.1:80"}
+          - {service: "http_status:404"}
+
+    - name: Keep the tailnet-only zone's previews here
+      ansible.builtin.set_fact:
+        ci_previews_enabled: false
+
+    - name: Check that its wildcard points at this host's tailnet address then
+      ansible.builtin.assert:
+        that:
+          - cloudflare_local_tailnet_zones | map(attribute='wildcard') | list == ['*.Example.dev']
+          - cloudflare_tailnet_names[-1].name == '*.example.dev'
+          - cloudflare_tailnet_names[-1].zone == 'example.dev'
+          - cloudflare_tunnel_ingress | map(attribute='hostname', default='') | select('search', 'example.dev') | list == []
+        fail_msg: "Tailnet: {{ cloudflare_tailnet_names }}. Routes: {{ cloudflare_tunnel_ingress }}"
+
+    - name: Put a zone behind Access next to the tailnet-only one
+      ansible.builtin.set_fact:
+        preview_zones: [{zone: example.dev, tailnet: true}, {zone: example.net}]
+
+    - name: Check that only that zone gets Access
+      ansible.builtin.assert:
+        that:
+          - preview_protected_zones == ['example.net']
+          - cloudflare_access_zones | map(attribute='zone') | list == ['example.net']
+          - cloudflare_local_zones | map(attribute='zone') | list == ['example.net']
+          - "'*.example.net' in cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list"
+        fail_msg: "Access: {{ cloudflare_access_zones }}. Routes: {{ cloudflare_tunnel_ingress }}"

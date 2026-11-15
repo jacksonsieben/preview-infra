@@ -5,22 +5,19 @@
 # Previews on ci-1). The Docker networks, and ci-1's tunnel on Cloudflare,
 # stay: remove them by hand if you are done with them.
 
-- name: Look for ci-1's cloudflared
-  ansible.builtin.stat:
-    path: "{{ ci_previews_cloudflared_dir }}/compose.yml"
-  register: ci_previews_cloudflared_compose
+- name: Take ci-1's cloudflared down
+  ansible.builtin.include_tasks: cloudflared_down.yml
 
-- name: Stop ci-1's cloudflared
+- name: Read ci-1's Tailscale Serve settings
+  ansible.builtin.command: tailscale serve status --json
+  register: ci_previews_serve
+  changed_when: false
+
+- name: Stop forwarding the tailnet's port 443 to Traefik
   ansible.builtin.command:
-    cmd: docker compose down
-    chdir: "{{ ci_previews_cloudflared_dir }}"
+    argv: [tailscale, serve, "--tcp={{ ci_previews_tailnet_port }}", "off"]
   changed_when: true
-  when: ci_previews_cloudflared_compose.stat.exists
-
-- name: Remove the tunnel token
-  ansible.builtin.file:
-    path: "{{ ci_previews_cloudflared_dir }}"
-    state: absent
+  when: ci_previews_serve_forward == ci_previews_tailnet_target
 
 - name: Stop preview-access on ci-1
   ansible.builtin.include_role:

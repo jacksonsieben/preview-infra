@@ -233,6 +233,34 @@ def test_hosts(key):
           (True, "not protected"))
 
 
+def test_tailnet(key):
+    """A tailnet-only zone: no token needed, but never through Cloudflare."""
+    keys = pa.Keys(ISSUER + "/cdn-cgi/access/certs", fetch=FakeCerts(key), clock=Clock())
+    hosts = [pa.re.compile(p, pa.re.IGNORECASE) for p in
+             [r"^pr-[0-9]+(-[a-z0-9]+)*\.example\.net$", r"^pr-[0-9]+(-[a-z0-9]+)*\.example\.dev$"]]
+    tailnet = ["example.net"]
+
+    def ask(host, via_cloudflare=False, token=None, served_hosts=()):
+        return pa.check(host, token, ZONES, ISSUER, keys, NOW, served_hosts, tailnet, via_cloudflare)
+
+    check("tailnet: a name on the zone passes without a token", ask("main.example.net"), (True, "tailnet only"))
+    check("tailnet: the apex too", ask("Example.NET:443"), (True, "tailnet only"))
+    check("tailnet: through Cloudflare, refused", ask("main.example.net", True), (False, pa.NOT_FROM_TAILNET))
+    check("tailnet: through Cloudflare, refused even with a token",
+          ask("main.example.net", True, key.token()), (False, pa.NOT_FROM_TAILNET))
+    check("tailnet: a name ending like the zone is another zone", ask("badexample.net", True),
+          (True, "not protected"))
+    check("tailnet: a protected zone still needs its token", ask("main.example.dev"),
+          (False, "no Cf-Access-Jwt-Assertion header"))
+    check("tailnet: other hosts through Cloudflare pass as before", ask("main.example.com", True),
+          (True, "not protected"))
+    check("tailnet hosts: a preview passes", ask("pr-3.example.net", served_hosts=hosts), (True, "tailnet only"))
+    check("tailnet hosts: through Cloudflare, refused", ask("pr-3.example.net", True, served_hosts=hosts),
+          (False, pa.NOT_FROM_TAILNET))
+    check("tailnet hosts: another name, refused first", ask("main.example.net", served_hosts=hosts),
+          (False, pa.HOST_NOT_SERVED))
+
+
 def test_short_key(directory):
     short = Key(directory, "short", bits=1024)
     keys = pa.Keys(ISSUER + "/cdn-cgi/access/certs", fetch=FakeCerts(short), clock=Clock())
@@ -247,8 +275,8 @@ def test_http(key):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}/"
 
-    def ask(host, token=None, method="GET"):
-        headers = {"X-Forwarded-Host": host}
+    def ask(host, token=None, method="GET", headers=None):
+        headers = {"X-Forwarded-Host": host} | (headers or {})
         if token:
             headers["Cf-Access-Jwt-Assertion"] = token
         try:
@@ -281,6 +309,19 @@ def test_http(key):
         served.shutdown()
         served.server_close()
 
+    tailnet = pa.serve({"listen": ["127.0.0.1", 0], "issuer": ISSUER, "zones": {"example.dev": [AUD]},
+                        "tailnet_zones": ["Example.net"]}, keys=keys)
+    threading.Thread(target=tailnet.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{tailnet.server_address[1]}/"
+    try:
+        check("HTTP tailnet: straight to Traefik", ask("main.example.net"), (200, b""))
+        check("HTTP tailnet: through Cloudflare",
+              ask("main.example.net", headers={"CF-Connecting-IP": "198.51.100.7"}), (403, pa.TAILNET_ONLY))
+        check("HTTP tailnet: a protected zone", ask("main.example.dev"), (403, pa.DENIED))
+    finally:
+        tailnet.shutdown()
+        tailnet.server_close()
+
 
 def main():
     with tempfile.TemporaryDirectory() as directory:
@@ -289,6 +330,7 @@ def main():
         stranger = Key(directory, "stranger")
         test_check(key, rotated, stranger)
         test_hosts(key)
+        test_tailnet(key)
         test_short_key(directory)
         test_http(key)
     print("all ok")

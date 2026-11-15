@@ -9,14 +9,17 @@ preview is removed when the PR closes.
   on the PR (through its GitHub App).
 - **Cloudflare Tunnel** publishes the machine without opening a router port or
   needing a fixed IP. Cloudflare terminates HTTPS.
-- **Tailscale Serve** puts the Coolify dashboard on your tailnet only. The
-  tunnel exposes just the webhook path GitHub needs.
+- **Tailscale Serve** puts the Coolify dashboard on your tailnet only, at a
+  name of your own (`https://coolify.example.dev`): it forwards port 443 of
+  the host's tailnet address to Traefik, which has the certificate. The tunnel
+  exposes just the webhook path GitHub needs.
 - **This playbook** installs both and sets up the tunnel routes and DNS
   through the Cloudflare API, so you can rebuild the whole thing on another
   machine with one command.
 - **More zones** (optional) get previews too, each behind **Cloudflare
   Access**: only the e-mails you list can open them. See
-  [More zones and apps](#more-zones-and-apps).
+  [More zones and apps](#more-zones-and-apps). Or **on your tailnet only**,
+  with no tunnel and no Access: see [Tailnet-only zones](#tailnet-only-zones).
 - **A GitHub Actions runner** (optional) runs the Actions jobs of your private
   repositories here, one container per job, instead of on GitHub's minutes.
 - **A remote host** (optional, `ci-1`) takes work off this one: Actions
@@ -29,7 +32,7 @@ PR opened / pushed ─► GitHub App webhook ─► coolify.example.com/webhooks
                                                                             │ tunnel
 https://pr-36-preview.example.com ─► Cloudflare ─► cloudflared ─► Traefik :80 ─► preview container
 
-you, on the tailnet ─► https://<machine>.<tailnet>.ts.net ─► Tailscale Serve ─► Coolify dashboard
+you, on the tailnet ─► https://coolify.example.dev ─► Tailscale Serve (TCP 443) ─► Traefik 127.0.0.1:443 ─► Coolify dashboard
 ```
 
 What Ansible does **not** do: the Coolify UI steps in
@@ -122,11 +125,24 @@ their IDs (`op item list` shows them); IDs survive renaming the item. The
 Coolify account is only read on the first run, when Coolify gets installed.
 
 **Tailscale** (with `coolify_dashboard: tailscale`, the default). The host must
-be logged in to your tailnet (`tailscale up`). In the admin console →
-[DNS](https://login.tailscale.com/admin/dns), turn on *MagicDNS* and *HTTPS
-Certificates*. The playbook stops with a message if either is missing. Set
-`coolify_dashboard: public` to skip Tailscale and serve the dashboard at
-`coolify.<domain>` instead.
+be logged in to your tailnet (`tailscale up`), and the dashboard needs a name
+on a [tailnet-only zone](#tailnet-only-zones), in `local.yml`:
+
+```yaml
+coolify_dashboard_hostname: coolify.example.dev
+preview_zones:
+  - zone: example.dev
+    tailnet: true
+```
+
+Its DNS record points at the host's tailnet address, and Tailscale Serve
+forwards port 443 there, as TCP, to Traefik on 127.0.0.1:443, which serves
+the dashboard with a Let's Encrypt certificate it gets through Cloudflare
+DNS-01. That needs a Cloudflare token in a file on the host (see
+[Tailnet-only zones](#tailnet-only-zones) for the token and the file). The
+host's `.ts.net` name no longer opens the dashboard: Traefik answers only for
+the names it serves. Set `coolify_dashboard: public` to skip Tailscale and
+serve the dashboard at `coolify.<domain>` instead.
 
 **Redirects, set by hand in the Cloudflare dashboard.** Coolify serves plain HTTP
 behind the tunnel (see [Why `http://`](#why-http-in-coolify)), so turn on
@@ -143,14 +159,18 @@ ansible-playbook site.yml -K          # -K asks for the sudo password
 
 It is idempotent; rerun it any time. Afterwards:
 
-- `https://<machine>.<tailnet>.ts.net` (from any device on your tailnet) and
-  `http://127.0.0.1:8000` (on the host) open the Coolify dashboard. Log in with
-  the Coolify account. `https://coolify.example.com` answers 404 except
-  under `/webhooks/`.
+- `https://<coolify_dashboard_hostname>` (from any device on your tailnet)
+  and `http://127.0.0.1:8000` (on the host) open the Coolify dashboard. Log
+  in with the Coolify account. `https://coolify.example.com` answers 404
+  except under `/webhooks/`. `tailscale serve status` shows port 443 as a
+  TCP forward to `127.0.0.1:443`, and no HTTPS routes.
 - Cloudflare → Zero Trust → Networks → Tunnels shows `preview-host` as
   *Healthy*.
 - DNS has proxied CNAMEs `coolify`, `*` and each of `production_hostnames`
   pointing at the tunnel.
+- With a tailnet-only zone: the dashboard's name and that zone's
+  `production_hostnames` have grey (DNS only) `A` records with the host's
+  tailnet address, and no tunnel route.
 - With more zones: each has a proxied `*` CNAME too, and Zero Trust → Access →
   Applications lists `preview-infra: <zone> previews`. The last task of the
   role opened `https://preview-infra-check.<zone>` and got the Access login,
@@ -307,6 +327,75 @@ printed at the end of the run. Also:
 Open a PR: the GitHub App comments on it with the preview link, and updates
 the comment on every push.
 
+### Tailnet-only zones
+
+A zone of `preview_zones` with `tailnet: true` is served on your tailnet only.
+Its names get grey (DNS only) `A` records with a tailnet address (`100.x`),
+so anyone can look them up but only devices on your tailnet reach them, and
+nothing on it goes through a Cloudflare tunnel or Access:
+
+```yaml
+preview_zones:
+  - zone: example.dev
+    tailnet: true
+```
+
+| On the zone | Record | Served by |
+|---|---|---|
+| `coolify_dashboard_hostname`, `production_hostnames` there | `A` → preview host's tailnet address | the preview host's Traefik |
+| `*.<zone>` (PR previews), on the preview host | `A` → preview host's tailnet address | the preview host's Traefik |
+| `*.<zone>` (PR previews), with the zone in `ci_previews_zones` | `A` → `ci-1`'s tailnet address | `ci-1`'s Traefik |
+
+On each host, Tailscale Serve forwards TCP 443 of the tailnet address to
+Traefik on 127.0.0.1:443, and Traefik gets its Let's Encrypt certificates
+through Cloudflare DNS-01, since Let's Encrypt can't reach it for the HTTP
+challenge. On `ci-1`, one wildcard certificate per zone (`<zone>` and
+`*.<zone>`) covers every PR preview. In Coolify, the apps there use
+`https://` domains (the run prints them). `preview-access` lets these hosts
+through with no Access token, and refuses (403) a request for one of them
+that came through Cloudflare, which carries `Cf-Connecting-Ip`: these names
+are served from the tailnet only.
+
+**Tunnel and Access, or tailnet only?** Per zone, not per name:
+
+- **Tailnet only** when every person who opens the previews is on your
+  tailnet: your own projects, a team that shares the tailnet. Nothing is on
+  the internet and there is no login to get past. Who reaches what is up to
+  the [Tailscale ACL](#tailscale-acl).
+- **Tunnel and Access** (no `tailnet`) when someone outside the tailnet must
+  open a preview: a client, a reviewer with only a browser. Access asks for
+  their e-mail first.
+- `domain` itself always keeps the tunnel: GitHub's webhooks reach Coolify
+  through it.
+
+**The Cloudflare tokens for DNS-01.** One per host, in a file you put there
+yourself; the playbook checks the file exists and is not empty, stops with
+a message if not, and never reads it (Traefik gets it mounted read-only).
+Create each one in Cloudflare → My Profile → API Tokens → Custom token, with
+*Zone → DNS → Edit* and *Zone → Zone → Read*, limited to the tailnet-only
+zones that host serves. Then, on the host:
+
+```bash
+sudo install -d -m 0700 /etc/preview-infra
+sudo sh -c 'umask 077; cat > /etc/preview-infra/cloudflare-dns-token'   # paste the token, Enter, Ctrl-D
+```
+
+| Host | Setting | Default path | Needed with |
+|---|---|---|---|
+| preview host | `coolify_dns_token_file` | `/etc/preview-infra/cloudflare-dns-token` | `coolify_dashboard: tailscale` |
+| `ci-1` | `ci_previews_dns_token_file` | `/etc/preview-infra/cloudflare-dns-token` | a tailnet-only zone in `ci_previews_zones` |
+
+Traefik reads the token through `CF_DNS_API_TOKEN_FILE`; a
+`CF_DNS_API_TOKEN` written into Coolify's proxy configuration by hand is
+removed. The HTTP challenge is removed too, `httpchallenge.entrypoint`
+included (in Traefik 3, that line alone turns it back on).
+
+**From a zone behind Access to tailnet only:** add `tailnet: true` and rerun.
+The zone's records become grey `A` records; its Access application stays in
+Zero Trust until you delete it there (Access → Applications →
+`preview-infra: <zone> previews`). Its apps' domains in Coolify change to
+`https://` (printed at the end of the run).
+
 ## Environment variables
 
 Any entry of `coolify_apps` or `preview_apps` can set environment variables,
@@ -369,7 +458,8 @@ names and defaults, and `python3 tests/github_runner_job.py` runs
 Traefik file of the previews on `ci-1`, `ansible-playbook
 tests/ci_previews_coolify.yml` that their Coolify settings go to `ci-1`'s
 server, and `python3 tests/preview_limit.py` which previews `preview-limit`
-stops. The *Checks* workflow
+stops. `ansible-playbook tests/proxy_dns01.yml` checks Traefik's DNS-01
+settings against a stand-in for `docker`. The *Checks* workflow
 (`.github/workflows/checks.yml`) runs them all on every pull request, on
 GitHub's runners.
 
@@ -431,10 +521,13 @@ After that:
   Coolify builds and runs the PR previews of those apps on `ci-1`, each app
   on a network that reaches only the internet; this host keeps the webhooks
   and production. What stays open there is listed in that section.
-- **Previews on more zones are behind Cloudflare Access.** The playbook will
-  not route a zone in `preview_zones` without an e-mail to allow, and checks
-  after every run that the zone asks for the login. Previews on `domain`
-  stay public, as before.
+- **Previews on more zones are behind Cloudflare Access, or on the tailnet
+  only.** The playbook will not route a zone in `preview_zones` without an
+  e-mail to allow, and checks after every run that the zone asks for the
+  login. A [tailnet-only zone](#tailnet-only-zones) has no route: only your
+  tailnet reaches it, as the [Tailscale ACL](#tailscale-acl) allows, and
+  Traefik refuses its names on a request that came through Cloudflare.
+  Previews on `domain` stay public, as before.
 - **Traefik checks the Access token too, not only Cloudflare.** Traefik
   listens on 127.0.0.1:80 and routes by `Host` header, so without a check of
   its own any process on the preview host, agent workers included, would skip
@@ -467,6 +560,61 @@ After that:
   `Match Address <coolify subnet>` block at the end of `/etc/ssh/sshd_config`
   with `PermitRootLogin prohibit-password`, and a ufw rule for port 22 from
   that subnet only. Every other source keeps the host's own SSH rules.
+
+## Tailscale ACL
+
+The hosts are tagged, and the tailnet policy decides what reaches what. The
+playbook doesn't change the policy; set it by hand in the admin console →
+[Access controls](https://login.tailscale.com/admin/acls).
+
+| Tag | Host |
+|---|---|
+| `tag:coolify` | the preview host (Coolify, the playbook runs here) |
+| `tag:web` | the web host |
+| `tag:ci` | `ci-1` |
+
+What the setup uses on the tailnet:
+
+| From | To | For |
+|---|---|---|
+| your own devices | preview host :443 | the dashboard, previews of tailnet-only zones kept there |
+| your own devices | `ci-1` :443 | PR previews of tailnet-only zones on `ci-1` |
+| your own devices | any host :22 | SSH |
+| `tag:coolify` | `tag:ci` :22 | Coolify manages `ci-1` over SSH; the playbook reaches `ci-1` the same way |
+| `tag:coolify` | `tag:web` :22 | SSH from the preview host to the web host |
+
+Nothing else: no host reaches your devices or another host, and nothing
+here needs it. Let's Encrypt, Cloudflare's API and the tunnels go over the
+internet, not the tailnet. The policy:
+
+```json
+{
+  "tagOwners": {
+    "tag:coolify": ["autogroup:admin"],
+    "tag:web":     ["autogroup:admin"],
+    "tag:ci":      ["autogroup:admin"]
+  },
+  "acls": [
+    {"action": "accept", "src": ["autogroup:member"], "dst": ["*:*"]},
+    {"action": "accept", "src": ["tag:coolify"], "dst": ["tag:web:22", "tag:ci:22"]}
+  ]
+}
+```
+
+Tag each host once, from the host: `sudo tailscale up --advertise-tags=tag:ci`
+(`tag:coolify`, `tag:web` on the others), or in the admin console →
+Machines → *Edit ACL tags*. A tagged host loses its owner's access rights:
+only the rules above apply to it.
+
+**Coolify Sentinel on another server** (its metrics in the dashboard) sends
+them from that server to Coolify at `https://<coolify_dashboard_hostname>`,
+on the preview host's tailnet address. That is traffic from a server to
+another, which the policy above refuses: Sentinel's reports fail there, and
+nothing else does. To have them, add the rule for that server's tag:
+
+```json
+{"action": "accept", "src": ["tag:ci"], "dst": ["tag:coolify:443"]}
+```
 
 ## Cleanup
 
@@ -677,8 +825,10 @@ Coolify runs there ([Previews on ci-1](#previews-on-ci-1)).
   address: bound to the Tailscale one, it would fail when it starts before
   `tailscaled` at boot, and lock the host.
 
-Whoever is on your tailnet reaches every port of `ci-1`; narrow that with
-Tailscale's access controls if others share the tailnet.
+Whoever is on your tailnet reaches every port of `ci-1` that the
+[Tailscale ACL](#tailscale-acl) lets through. With a
+[tailnet-only zone](#tailnet-only-zones) on `ci-1`, Tailscale Serve answers
+on port 443 of its tailnet address and forwards it to Traefik on 127.0.0.1.
 
 **Docker ignores ufw.** A container published with `-p 8080:80` answers on the
 public address whatever ufw says, because Docker's rules come first. The
@@ -871,8 +1021,9 @@ so no pull request code runs on the preview host, not even its build. The
 preview host's Coolify still receives GitHub's webhooks, and manages `ci-1`
 as a second server over SSH through the tailnet. It builds each preview there
 (natively, `linux/arm64`) and runs it on a Docker network of the app's own.
-`ci-1` publishes the previews through a Cloudflare tunnel of its own and
-still has no port open to the internet. Production stays where it is.
+`ci-1` publishes the previews through a Cloudflare tunnel of its own, or,
+on a [tailnet-only zone](#tailnet-only-zones), on its tailnet address only,
+and still has no port open to the internet. Production stays where it is.
 
 ```
 PR opened ─► GitHub App webhook ─► coolify.example.com/webhooks/ ─► Coolify on the preview host
@@ -900,6 +1051,15 @@ their Access application, which the preview host's play keeps, and
 `preview-access` on `ci-1` checks the same token as on the preview host. The
 others stay public, as before. Every answer from `ci-1` carries
 `X-Robots-Tag: noindex, nofollow`, on top of the apps' own.
+
+**Tailnet-only zones on `ci-1`.** A zone in both `ci_previews_zones` and
+[tailnet-only](#tailnet-only-zones) gets no route on `ci-1`'s tunnel: its
+wildcard is a grey `A` record with `ci-1`'s tailnet address, Tailscale Serve
+there forwards TCP 443 to Traefik, and Traefik holds one wildcard
+certificate for the zone, through DNS-01 with `ci-1`'s own token
+(`ci_previews_dns_token_file`). No Access application is needed for it. With
+every zone of `ci_previews_zones` tailnet-only, `ci-1` runs no cloudflared at
+all, and the playbook takes it down.
 
 **Two apps per repository.** Coolify deploys a PR preview on the server of
 the application it belongs to. An app whose production stays on the preview
@@ -1041,6 +1201,9 @@ to move a wildcard before the preview host has the records of its own names.
    ci_previews_networks: [myapp, site]        # one per app
    ```
 
+   A [tailnet-only zone](#tailnet-only-zones) among `ci_previews_zones` needs
+   `ci-1`'s own Cloudflare token in `ci_previews_dns_token_file` on `ci-1`
+   first; the run stops without it.
 3. **Run the playbook.** The preview host gets the records and routes of
    `production_hostnames` and drops the wildcards; `ci-1` gets Coolify's
    login, the networks `previews-myapp` and `previews-site`, its tunnel (Zero
@@ -1145,8 +1308,14 @@ its own registration on GitHub. To retire it:
   publishes its dashboard on host port 8080, which collides with anything
   else there (a local `bootRun`, for one). The playbook removes that port; if
   you reset the proxy configuration in Coolify, rerun the playbook.
-- **Dashboard says realtime is not connected** on the tailnet address. Check
-  `tailscale serve status`: it should list `/`, `/app` and `/terminal/ws`.
+- **Dashboard says realtime is not connected.** Open it at
+  `https://<coolify_dashboard_hostname>`, the instance domain the playbook
+  sets, not at another name. Check `tailscale serve status`: port 443 should
+  be a TCP forward to `127.0.0.1:443`, with no HTTPS routes.
+- **The dashboard or a tailnet-only preview has a certificate error.** Traefik
+  had no certificate yet. `docker logs coolify-proxy 2>&1 | grep -i acme`
+  shows why; usually the token (wrong zone, missing permission). Fix the
+  file and restart the proxy (`docker restart coolify-proxy`).
 - **"Permission denied (publickey)" on the first deploy.** The application was
   created as *Private Repository (with Deploy Key)* and picked the GitHub App's
   key, which GitHub does not accept for SSH. Create it as *Private Repository
@@ -1184,8 +1353,9 @@ site.yml                         playbook: coolify, tailscale_dashboard, cloudfl
 inventory/hosts.yml              which machine is the preview host, and the remote host (ci)
 group_vars/all/defaults.yml      every setting and its default
 group_vars/all/local.yml         your settings (not in git; template: local.example.yml)
-roles/coolify/                   runs Coolify's installer once, binds its ports to loopback, limits concurrent builds
-roles/tailscale_dashboard/       dashboard on the tailnet with Tailscale Serve
+roles/coolify/                   runs Coolify's installer once, binds its ports to loopback, limits concurrent builds,
+                                 Traefik's certificates through DNS-01 (tasks/proxy_dns01.yml)
+roles/tailscale_dashboard/       dashboard on the tailnet: Tailscale Serve forwards TCP 443 to Traefik
 roles/cloudflare_tunnel/         tunnel + routes + DNS via API, cloudflared in Docker,
                                  Cloudflare Access for the other zones (tasks/access.yml)
 roles/preview_access/            Traefik checks the Access token of the other zones itself (preview-access,
@@ -1210,5 +1380,6 @@ tests/preview_access.py          which requests preview-access lets through, wit
 tests/ci_previews_settings.yml   offline check of the remote host's preview routes, hosts, kept names and Traefik file
 tests/ci_previews_coolify.yml    the remote server's Coolify settings against a stand-in for docker
 tests/preview_limit.py           which previews preview-limit stops, against a stand-in for docker
+tests/proxy_dns01.yml            Traefik's certificates through DNS-01 in Coolify's proxy configuration, against a stand-in for docker
 .github/workflows/checks.yml     the syntax check and the tests above, on every pull request
 ```

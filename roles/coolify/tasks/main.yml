@@ -110,6 +110,12 @@
 - name: Apply the Coolify port changes
   ansible.builtin.meta: flush_handlers
 
+# The dashboard is served by Traefik on its own name (tailscale_dashboard
+# role), with a certificate only DNS-01 can get: Traefik is on loopback.
+- name: Give Traefik its certificates through Cloudflare DNS-01
+  ansible.builtin.include_tasks: proxy_dns01.yml
+  when: coolify_dashboard == 'tailscale'
+
 - name: Wait for the Coolify dashboard
   ansible.builtin.uri:
     url: http://127.0.0.1:8000/api/health

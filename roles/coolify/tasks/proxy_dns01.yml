@@ -1,0 +1,104 @@
+---
+# Traefik's Let's Encrypt certificates through Cloudflare DNS-01, for the
+# Coolify server in coolify_server_php (this host, or the remote one from
+# roles/ci_previews): the proxy configuration Coolify keeps in its database
+# gets coolify_proxy_dns01_config (defaults/main.yml), through Coolify's own
+# actions, like the loopback ports (proxy_ports.yml).
+#
+# The token stays in its file on coolify_proxy_host: checked here, mounted
+# into Traefik, never read. The configuration is read and written with
+# no_log, because a token written into it by hand would be in it.
+
+- name: Look for the Cloudflare token for DNS-01
+  ansible.builtin.stat:
+    path: "{{ coolify_proxy_dns_token_file }}"
+    get_checksum: false
+  delegate_to: "{{ coolify_proxy_host }}"
+  register: coolify_proxy_dns_token
+
+- name: Check the Cloudflare token for DNS-01
+  ansible.builtin.assert:
+    that:
+      - coolify_proxy_dns_token.stat.exists
+      - coolify_proxy_dns_token.stat.isreg
+      - coolify_proxy_dns_token.stat.size > 0
+    fail_msg: >-
+      {{ coolify_proxy_dns_token_file }} is missing or empty on
+      {{ coolify_proxy_host }}. Traefik there gets its certificates through
+      Cloudflare DNS-01 with a token you put in that file yourself: a
+      Cloudflare API token with Zone > DNS > Edit and Zone > Zone > Read on
+      the tailnet-only zones it serves, alone in the file, owned by root,
+      mode 0600 (README, Tailnet-only zones). The playbook never reads it.
+    quiet: true
+
+- name: Read the proxy configuration
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        $s = {{ coolify_server_php }};
+        echo 'config:' . base64_encode(App\Actions\Proxy\GetProxyConfiguration::run($s));
+  register: coolify_proxy_read
+  changed_when: false
+  failed_when: >-
+    coolify_proxy_read.rc != 0
+    or coolify_proxy_read.stdout_lines | select('match', '^config:.') | list | length != 1
+  no_log: true
+
+- name: Work out the proxy configuration with DNS-01
+  ansible.builtin.set_fact:
+    coolify_proxy_current: >-
+      {{ coolify_proxy_read.stdout_lines | select('match', '^config:') | first
+         | regex_replace('^config:', '') | b64decode | from_yaml }}
+  no_log: true
+
+- name: Check that the proxy configuration is Traefik's
+  ansible.builtin.assert:
+    that:
+      - coolify_proxy_current is mapping
+      - coolify_proxy_current.services.traefik.command | default('') is sequence
+      - coolify_proxy_current.services.traefik.command | default('') is not string
+    fail_msg: >-
+      The proxy configuration of {{ coolify_proxy_host }} in Coolify has no
+      services.traefik.command list: is its proxy Traefik? Reset it in
+      Coolify (Servers > Proxy > Reset configuration) and rerun.
+    quiet: true
+
+- name: Remember the proxy configuration with DNS-01
+  ansible.builtin.set_fact:
+    coolify_proxy_wanted: "{{ coolify_proxy_dns01_config }}"
+  no_log: true
+
+- name: Give Traefik its certificates through DNS-01
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - coolify
+      - php
+      - /var/www/html/artisan
+      - tinker
+      - --execute
+      - >-
+        $s = {{ coolify_server_php }};
+        App\Actions\Proxy\SaveProxyConfiguration::run($s, base64_decode('{{ coolify_proxy_wanted | to_nice_yaml(indent=2, width=4096) | b64encode }}'));
+        App\Actions\Proxy\StartProxy::run($s, async: false, force: true);
+        echo 'changed';
+  register: coolify_proxy_dns01
+  changed_when: true
+  failed_when: coolify_proxy_dns01.rc != 0 or 'changed' not in coolify_proxy_dns01.stdout_lines
+  when: coolify_proxy_wanted != coolify_proxy_current
+  no_log: true
+
+- name: Show Traefik's certificate settings
+  ansible.builtin.debug:
+    msg: >-
+      {{ coolify_proxy_wanted.services.traefik.command
+         | select('match', '^--(certificatesresolvers|entrypoints\.https\.http\.tls)\.') | list
+         + coolify_proxy_wanted.services.traefik.environment | select('match', '^CF_') | list }}

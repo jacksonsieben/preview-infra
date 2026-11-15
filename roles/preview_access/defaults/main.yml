@@ -17,8 +17,8 @@ preview_access_traefik_file: /data/coolify/proxy/dynamic/preview-access.yaml
 # preview_access_traefik_file, so it is routed even before any app exists.
 preview_access_probe: preview-infra-check
 
-# The zones whose Access token Traefik checks: those of preview_zones, with
-# the audiences the cloudflare_tunnel role read.
+# The zones whose Access token Traefik checks: those of preview_zones but the
+# tailnet-only ones, with the audiences the cloudflare_tunnel role read.
 preview_access_zones: "{{ cloudflare_access_auds | default({}) | dict2items | map(attribute='key') | sort }}"
 
 # Whether preview-access runs here. On the preview host, while there is a zone
@@ -29,6 +29,11 @@ preview_access_wanted: "{{ preview_zones | length > 0 }}"
 # get 403. Empty serves every host (the preview host). The ci_previews role
 # narrows the remote host to PR previews.
 preview_access_hosts: []
+
+# Tailnet-only zones (preview_zones, `tailnet: true`): no Access token
+# needed, but a request that came through Cloudflare (Cf-Connecting-Ip) is
+# refused, so no tunnel serves them.
+preview_access_tailnet_zones: "{{ preview_tailnet_zones }}"
 
 # Zones that get the probe router, and the check that Traefik refuses it.
 preview_access_probe_zones: "{{ preview_access_zones }}"

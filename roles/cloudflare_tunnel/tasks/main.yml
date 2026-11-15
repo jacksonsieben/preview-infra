@@ -11,15 +11,34 @@
       - item.wildcard is match('^\\*\\.[^*]+$')
       - item.wildcard is search('\\.' ~ (item.zone | regex_escape) ~ '$')
       - item.access_emails is not string
-      - item.access_emails | default([], true) | length > 0
+      - item.tailnet or item.access_emails | default([], true) | length > 0
     fail_msg: >-
       Each entry of preview_zones needs a zone other than `domain`, a wildcard
-      *.<name> inside that zone, and at least one e-mail in access_emails or
-      preview_access_emails: previews there are never left open.
+      *.<name> inside that zone, and, unless it has `tailnet: true`, at least
+      one e-mail in access_emails or preview_access_emails: previews there
+      are never left open.
     quiet: true
   loop: "{{ cloudflare_extra_zones }}"
   loop_control:
     label: "{{ item.zone | default('?') }}"
+
+# A tailnet-only zone is reached through Tailscale Serve's port 443, which
+# the tailscale_dashboard role sets up; the dashboard's name must be on such a
+# zone, where Traefik gets its certificate through DNS-01.
+- name: Check the tailnet-only zones
+  ansible.builtin.assert:
+    that:
+      - preview_tailnet_zones | length == 0 or coolify_dashboard == 'tailscale'
+      - coolify_dashboard != 'tailscale'
+        or cloudflare_tunnel_dns_zones[coolify_dashboard_hostname] | default('') in preview_tailnet_zones
+      - coolify_dashboard_hostname | lower != coolify_hostname | lower
+    fail_msg: >-
+      Tailnet-only zones (preview_zones with `tailnet: true`) need
+      coolify_dashboard tailscale, and with coolify_dashboard tailscale,
+      coolify_dashboard_hostname must be a name on one of them, other than
+      coolify_hostname (README, Tailnet-only zones). Tailnet-only zones:
+      {{ preview_tailnet_zones }}.
+    quiet: true
 
 # A production hostname needs a zone to put its DNS record in.
 - name: Check the zones of the production hostnames
@@ -131,7 +150,7 @@
     headers: *cloudflare_headers
   register: cloudflare_access_org
   failed_when: false
-  when: cloudflare_extra_zones | length > 0
+  when: cloudflare_access_zones | length > 0
 
 - name: Check the Access team domain
   ansible.builtin.assert:
@@ -144,7 +163,7 @@
       and Groups: Read, and create the Zero Trust organization if there is
       none yet (README, More zones and apps).
     quiet: true
-  when: cloudflare_extra_zones | length > 0
+  when: cloudflare_access_zones | length > 0
 
 - name: Remember the Access team domain
   ansible.builtin.set_fact:
@@ -152,10 +171,11 @@
     cloudflare_access_auds: {}
 
 # Access goes up before the DNS record, so a new zone is never reachable
-# without the login, not even for the length of one run.
+# without the login, not even for the length of one run. Tailnet-only zones
+# get none (an Access application left from before stays: remove it by hand).
 - name: Put Cloudflare Access in front of the other preview zones
   ansible.builtin.include_tasks: access.yml
-  loop: "{{ cloudflare_extra_zones }}"
+  loop: "{{ cloudflare_access_zones }}"
   loop_control:
     loop_var: access_zone
     label: "{{ access_zone.zone }}"
@@ -182,6 +202,26 @@
   vars:
     dns_name: "{{ dns_zone.wildcard }}"
     dns_zone_id: "{{ cloudflare_extra_zone_ids[dns_zone.zone] }}"
+
+# --- tailnet-only zones ------------------------------------------------------
+
+- name: Read this host's tailnet address
+  ansible.builtin.command: tailscale ip -4
+  register: cloudflare_tailnet_ip
+  changed_when: false
+  when: cloudflare_tailnet_names | length > 0
+
+- name: Point the tailnet-only names at this host's tailnet address
+  ansible.builtin.include_tasks: dns_tailnet.yml
+  loop: "{{ cloudflare_tailnet_names }}"
+  loop_control:
+    loop_var: dns_tailnet
+    label: "{{ dns_tailnet.name }}"
+  vars:
+    dns_name: "{{ dns_tailnet.name }}"
+    dns_zone_id: "{{ cloudflare_extra_zone_ids_lower[dns_tailnet.zone] }}"
+    dns_address: "{{ cloudflare_tailnet_ip.stdout_lines | first }}"
+    dns_comment: Managed by preview-infra (tailnet only)
 
 - name: Read the tunnel token
   ansible.builtin.uri:
@@ -224,7 +264,7 @@
   ansible.builtin.uri:
     url: "https://{{ item.wildcard | replace('*', cloudflare_access_probe) }}/"
     follow_redirects: none
-  loop: "{{ cloudflare_extra_zones }}"
+  loop: "{{ cloudflare_access_zones }}"
   loop_control:
     label: "https://{{ item.wildcard | replace('*', cloudflare_access_probe) }}/"
   register: cloudflare_access_probe_result

@@ -34,9 +34,10 @@ cloudflare_tunnel_coolify_ingress:
 #
 # A zone whose previews ci-1 serves (cloudflare_ci_zones) keeps only the names
 # listed in production_hostnames here: its wildcard goes to ci-1's tunnel.
+# Names on tailnet-only zones get no route at all (cloudflare_tailnet_names).
 cloudflare_tunnel_ingress: >-
   {{ cloudflare_tunnel_coolify_ingress[coolify_dashboard]
-     + production_hostnames | map('community.general.dict_kv', 'hostname')
+     + cloudflare_tunnel_production_names | map('community.general.dict_kv', 'hostname')
        | map('combine', {'service': 'http://127.0.0.1:80'}) | list
      + ([] if domain | lower in cloudflare_ci_zones else [
        {'hostname': preview_wildcard, 'service': 'http://127.0.0.1:80'},
@@ -52,20 +53,51 @@ cloudflare_tunnel_ingress: >-
 cloudflare_tunnel_dns_names: >-
   {{ [coolify_hostname]
      + ([] if domain | lower in cloudflare_ci_zones else [preview_wildcard])
-     + production_hostnames }}
+     + cloudflare_tunnel_production_names }}
 
-# The zone of each name in cloudflare_tunnel_dns_names: the longest of
-# `domain` and preview_zones that the name is, or ends with. Empty for a name
-# on none of them (the run stops then).
+# The Coolify dashboard's name, with coolify_dashboard tailscale.
+cloudflare_dashboard_names: >-
+  {{ [coolify_dashboard_hostname] if coolify_dashboard == 'tailscale' and coolify_dashboard_hostname else [] }}
+
+# The zone of each name this host serves: the longest of `domain` and
+# preview_zones that the name is, or ends with. Empty for a name on none of
+# them (the run stops then).
 cloudflare_tunnel_dns_zones: >-
   {%- set zones = ([domain] + preview_zones | map(attribute='zone', default='') | list) | map('lower') | list -%}
   {%- set out = {} -%}
-  {%- for name in cloudflare_tunnel_dns_names -%}
+  {%- for name in [coolify_hostname, preview_wildcard] + production_hostnames + cloudflare_dashboard_names -%}
   {%- set ns = namespace(zone='') -%}
   {%- for zone in zones if zone and (name | lower == zone or (name | lower).endswith('.' ~ zone)) -%}
   {%- if zone | length > ns.zone | length %}{% set ns.zone = zone %}{% endif -%}
   {%- endfor -%}
   {%- set _ = out.update({name: ns.zone}) -%}
+  {%- endfor -%}
+  {{ out }}
+
+# production_hostnames that go through the tunnel: those not on a tailnet-only zone.
+cloudflare_tunnel_production_names: >-
+  {{ production_hostnames | reject('in', cloudflare_tailnet_hostnames) | list }}
+
+# The names on tailnet-only zones that this host serves: the dashboard and
+# those of production_hostnames. Each gets an unproxied A record to this
+# host's tailnet address, and no tunnel route.
+cloudflare_tailnet_hostnames: >-
+  {%- set out = [] -%}
+  {%- for name in production_hostnames + cloudflare_dashboard_names
+      if cloudflare_tunnel_dns_zones[name] | default('') in preview_tailnet_zones -%}
+  {%- set _ = out.append(name) -%}
+  {%- endfor -%}
+  {{ out | unique }}
+
+# Those names, and the wildcards of the tailnet-only zones whose previews stay
+# here (cloudflare_local_tailnet_zones), each with its zone.
+cloudflare_tailnet_names: >-
+  {%- set out = [] -%}
+  {%- for name in cloudflare_tailnet_hostnames -%}
+  {%- set _ = out.append({'name': name, 'zone': cloudflare_tunnel_dns_zones[name]}) -%}
+  {%- endfor -%}
+  {%- for z in cloudflare_local_tailnet_zones -%}
+  {%- set _ = out.append({'name': z.wildcard | lower, 'zone': z.zone | lower}) -%}
   {%- endfor -%}
   {{ out }}
 
@@ -78,18 +110,31 @@ cloudflare_ci_zones: "{{ ci_previews_zones | map('lower') | list if ci_previews_
 cloudflare_extra_zones: >-
   {%- set zones = [] -%}
   {%- for z in preview_zones -%}
-  {%- set _ = zones.append({'zone': '', 'wildcard': '*.' ~ (z.zone | default('')), 'access_emails': preview_access_emails} | combine(z)) -%}
+  {%- set _ = zones.append({'zone': '', 'wildcard': '*.' ~ (z.zone | default('')), 'access_emails': preview_access_emails} | combine(z)
+                           | combine({'tailnet': z.tailnet | default(false) | bool})) -%}
   {%- endfor -%}
   {{ zones }}
 
-# The zones of preview_zones whose wildcard comes to this host.
+# The zones of preview_zones behind Cloudflare Access: all but the
+# tailnet-only ones. Each gets an Access application, and the login check.
+cloudflare_access_zones: "{{ cloudflare_extra_zones | rejectattr('tailnet') | list }}"
+
+# The zones behind Access whose wildcard comes to this host's tunnel.
 cloudflare_local_zones: >-
   {%- set zones = [] -%}
-  {%- for z in cloudflare_extra_zones if z.zone | lower not in cloudflare_ci_zones -%}
+  {%- for z in cloudflare_access_zones if z.zone | lower not in cloudflare_ci_zones -%}
   {%- set _ = zones.append(z) -%}
   {%- endfor -%}
   {{ zones }}
 
-# Name opened on each zone in preview_zones after the run, which must answer
+# The tailnet-only zones whose previews stay on this host (not on ci-1).
+cloudflare_local_tailnet_zones: >-
+  {%- set zones = [] -%}
+  {%- for z in cloudflare_extra_zones if z.tailnet and z.zone | lower not in cloudflare_ci_zones -%}
+  {%- set _ = zones.append(z) -%}
+  {%- endfor -%}
+  {{ zones }}
+
+# Name opened on each zone behind Access after the run, which must answer
 # with the Cloudflare Access login rather than reach Coolify.
 cloudflare_access_probe: preview-infra-check
