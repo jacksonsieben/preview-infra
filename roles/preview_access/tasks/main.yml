@@ -9,19 +9,23 @@
 # Access application. Hosts on `domain` pass as before.
 #
 # Needs cloudflare_access_team_domain and cloudflare_access_auds from the
-# cloudflare_tunnel role, which creates the Access applications.
+# cloudflare_tunnel role, which creates the Access applications (on the
+# remote host, the ci_previews role reads them).
+#
+# The remote host also sets preview_access_hosts, so it answers for PR
+# previews only, and has no Coolify of its own: its proxy is changed from the
+# preview host (preview_access_manage_proxy).
 
 - name: Protect the preview zones on this host too
-  when: preview_zones | length > 0
-  vars:
-    preview_access_zones: "{{ cloudflare_access_auds | default({}) | dict2items | map(attribute='key') | sort }}"
+  when: preview_access_wanted | bool
   block:
-    - name: Check the Access settings from the cloudflare_tunnel role
+    - name: Check the Access settings
       ansible.builtin.assert:
         that:
-          - cloudflare_access_team_domain | default('') is match('^[a-z0-9.-]+$')
+          - preview_access_zones | length == 0 or cloudflare_access_team_domain | default('') is match('^[a-z0-9.-]+$')
           - preview_access_zones == preview_zones | map(attribute='zone') | map('lower') | sort
-          - cloudflare_access_auds.values() | map('first') | map('length') | min > 0
+          - cloudflare_access_auds | default({}) | dict2items | map(attribute='value') | map('first') | map('length') | select('equalto', 0) | list | length == 0
+          - preview_access_probe_zones | length > 0
         fail_msg: >-
           Every zone of preview_zones needs its Access application's audience
           (AUD) and the Access team domain: run the whole playbook, not this
@@ -45,8 +49,10 @@
       ansible.builtin.copy:
         content: >-
           {{ {'listen': ['0.0.0.0', preview_access_port | int],
-              'issuer': 'https://' ~ cloudflare_access_team_domain,
-              'zones': cloudflare_access_auds} | to_nice_json }}
+              'issuer': 'https://' ~ (cloudflare_access_team_domain | default('', true)),
+              'zones': cloudflare_access_auds | default({})}
+             | combine({'hosts': preview_access_hosts} if preview_access_hosts else {})
+             | to_nice_json }}
         dest: "{{ preview_access_dir }}/config.json"
         mode: "0644"
       notify: Restart preview-access
@@ -69,7 +75,9 @@
       ansible.builtin.meta: flush_handlers
 
     # Traefik answers 500 to every request while the middleware's service is
-    # down, so it must answer before Traefik uses it. No Host: lets it through.
+    # down, so it must answer before Traefik uses it. A request with no Host
+    # gets 200, or 403 where preview_access_hosts narrows the hosts: either
+    # way it answers.
     - name: Wait for preview-access
       ansible.builtin.command:
         argv:
@@ -78,14 +86,25 @@
           - preview-access
           - python3
           - -c
-          - "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:{{ preview_access_port }}/').status)"
+          - |
+            import urllib.error, urllib.request
+            try:
+                print(urllib.request.urlopen('http://127.0.0.1:{{ preview_access_port }}/').status)
+            except urllib.error.HTTPError as error:
+                print(error.code)
       register: preview_access_ready
       changed_when: false
-      until: preview_access_ready.rc == 0 and preview_access_ready.stdout == '200'
+      until: preview_access_ready.rc == 0 and preview_access_ready.stdout in ['200', '403']
       retries: 10
       delay: 3
 
     # Traefik's file provider picks up changes to this file by itself.
+    - name: Create Traefik's dynamic configuration directory
+      ansible.builtin.file:
+        path: "{{ preview_access_traefik_file | dirname }}"
+        state: directory
+        mode: "0755"
+
     - name: Define the preview-access middleware in Traefik
       ansible.builtin.template:
         src: traefik.yaml.j2
@@ -96,32 +115,52 @@
       ansible.builtin.include_tasks: entrypoints.yml
       vars:
         preview_access_on: true
+      when: preview_access_manage_proxy | bool
+
+    # On the remote host, Coolify starts the proxy once the host is added in
+    # its dashboard (README, Previews on ci-1); until then there is nothing
+    # to check.
+    - name: Check whether Coolify's proxy runs here
+      ansible.builtin.command: docker ps --quiet --filter name=^coolify-proxy$ --filter status=running
+      register: preview_access_proxy
+      changed_when: false
+
+    - name: Report a proxy that is not running yet
+      ansible.builtin.debug:
+        msg: >-
+          Coolify's proxy is not running on {{ inventory_hostname }} yet, so
+          the check that Traefik refuses requests without a token is skipped.
+          Rerun the playbook once it runs.
+      when: preview_access_proxy.stdout | length == 0
 
     # Straight to Traefik, as a local process would: refused, without the
-    # Cloudflare Access login.
+    # Cloudflare Access login (or, on the remote host, for a host that is not
+    # a PR preview).
     - name: Check that Traefik refuses the protected zones without a token
       ansible.builtin.uri:
         url: http://127.0.0.1/
         headers:
           Host: "{{ preview_access_probe }}.{{ item }}"
         status_code: 403
-      loop: "{{ preview_access_zones }}"
+      loop: "{{ preview_access_probe_zones }}"
       loop_control:
         label: "curl -H 'Host: {{ preview_access_probe }}.{{ item }}' http://127.0.0.1/"
       register: preview_access_probe_result
       until: preview_access_probe_result is not failed
       retries: 12
       delay: 5
+      when: preview_access_proxy.stdout | length > 0
 
 # Without preview_zones nothing is protected: take the middleware off
 # Traefik first, then stop the service it calls.
 - name: Remove preview-access
-  when: preview_zones | length == 0
+  when: not (preview_access_wanted | bool)
   block:
     - name: Take preview-access off Traefik's routes
       ansible.builtin.include_tasks: entrypoints.yml
       vars:
         preview_access_on: false
+      when: preview_access_manage_proxy | bool
 
     - name: Remove the preview-access middleware from Traefik
       ansible.builtin.file:

@@ -1,10 +1,11 @@
 # Managed by Ansible (preview-infra). Local edits are overwritten.
 #
-# The middleware Coolify's proxy puts in front of every router of its http
+# The middlewares Coolify's proxy puts in front of every router of its http
 # and https entrypoints (--entrypoints.*.http.middlewares, set by the
-# playbook in Coolify's proxy configuration). preview-access refuses requests
-# to {{ preview_access_zones | join(', ') }} without a valid Cloudflare Access
-# token and lets every other host through.
+# playbook in Coolify's proxy configuration): {{ preview_access_middlewares | join(', ') }}.
+# preview-access refuses requests to {{ preview_access_zones | join(', ') if preview_access_zones else 'no zone' }} without a valid
+# Cloudflare Access token{{ ', and every host that is not a PR preview' if preview_access_hosts else '' }}, and lets
+# every other host through.
 http:
   middlewares:
     preview-access:
@@ -13,10 +14,17 @@ http:
         # The host it checks is the request's own, never an X-Forwarded-Host
         # sent by the client.
         trustForwardHeader: false
-  # A route that always exists on each protected zone, for the playbook's
-  # check that Traefik refuses it without a token.
+{% if preview_access_noindex %}
+    # Everything this host serves is a preview: keep it out of search engines.
+    preview-noindex:
+      headers:
+        customResponseHeaders:
+          X-Robots-Tag: "noindex, nofollow"
+{% endif %}
+  # A route that always exists on each probed zone, for the playbook's check
+  # that Traefik refuses it without a token.
   routers:
     preview-access-probe:
       entryPoints: [http]
-      rule: "{% for zone in preview_access_zones %}{{ ' || ' if not loop.first }}Host(`{{ preview_access_probe }}.{{ zone }}`){% endfor %}"
+      rule: "{% for zone in preview_access_probe_zones %}{{ ' || ' if not loop.first }}Host(`{{ preview_access_probe }}.{{ zone }}`){% endfor %}"
       service: noop@internal
