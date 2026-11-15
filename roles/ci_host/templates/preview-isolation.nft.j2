@@ -1,0 +1,28 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# Keeps the PR previews (README, Previews on ci-1) on their own Docker
+# network: what a preview sends off its bridge reaches the internet only.
+#
+# A table of its own, hooked before the iptables FORWARD chain. Docker,
+# ufw and Tailscale all write to that chain, and Tailscale's ts-forward
+# accepts everything that leaves on tailscale0, ahead of DOCKER-USER
+# whenever tailscaled started after Docker. A drop here is final whatever
+# they accept, and none of them touches this table.
+table inet preview_isolation
+delete table inet preview_isolation
+
+table inet preview_isolation {
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+{% for bridge in ci_host_preview_bridges %}
+		iifname "{{ bridge }}" oifname "{{ bridge }}" return
+{% endfor %}
+{% if ci_host_preview_bridges %}
+		iifname "pv-*" oifname "{{ ci_host_tailnet_interface }}" drop
+		iifname "pv-*" ip daddr { {{ ci_host_preview_blocked_v4 | join(', ') }} } drop
+		# Previews have no IPv6 network.
+		iifname "pv-*" meta nfproto ipv6 drop
+{% endif %}
+	}
+}

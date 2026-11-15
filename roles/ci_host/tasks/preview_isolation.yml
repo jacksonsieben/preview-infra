@@ -1,0 +1,45 @@
+---
+# The PR previews' networks reach themselves and the internet only
+# (ci_host_preview_bridges, templates/preview-isolation.nft.j2). With no
+# preview network the table is empty. It goes in before Docker, so no
+# preview starts without it. nftables.service stays off, as Ubuntu ships it:
+# its /etc/nftables.conf flushes every table, Docker's and ufw's included.
+
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the preview-infra directory
+  ansible.builtin.file:
+    path: "{{ ci_host_preview_isolation_file | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Write the preview isolation rules
+  ansible.builtin.template:
+    src: preview-isolation.nft.j2
+    dest: "{{ ci_host_preview_isolation_file }}"
+    mode: "0644"
+    validate: /usr/sbin/nft -c -f %s
+  notify: Restart preview isolation
+
+- name: Install the preview isolation service
+  ansible.builtin.template:
+    src: preview-isolation.service.j2
+    dest: /etc/systemd/system/preview-isolation.service
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart preview isolation
+
+- name: Apply systemd changes before starting the preview isolation
+  ansible.builtin.meta: flush_handlers
+
+- name: Load the preview isolation rules at boot
+  ansible.builtin.systemd_service:
+    name: preview-isolation
+    enabled: true
+    state: started

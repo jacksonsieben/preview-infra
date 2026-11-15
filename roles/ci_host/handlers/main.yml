@@ -16,3 +16,9 @@
   ansible.builtin.systemd_service:
     name: memory-floor
     state: restarted
+
+# A oneshot: restarting it loads the rules again (nft -f replaces the table).
+- name: Restart preview isolation
+  ansible.builtin.systemd_service:
+    name: preview-isolation
+    state: restarted

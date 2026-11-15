@@ -112,3 +112,33 @@
         fail_msg: "{{ lines }}"
       vars:
         lines: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/52preview-infra-upgrades.j2').splitlines() }}"
+
+    - name: Check that the preview isolation table is empty while the previews are off
+      ansible.builtin.assert:
+        that:
+          - rules | reject('match', '#') | select('search', 'iifname|drop') | list == []
+          - "'type filter hook forward priority filter - 10; policy accept;' in rules"
+        fail_msg: "{{ rules }}"
+      vars:
+        ci_previews_networks: [luotsi]
+        rules: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/preview-isolation.nft.j2').splitlines() | map('trim') | list }}"
+
+    # Each preview network reaches itself and the internet only (README,
+    # Previews on ci-1): the same-bridge returns come before every drop.
+    - name: Check the rules that keep previews on their own network
+      ansible.builtin.assert:
+        that:
+          - rules | select('search', 'iifname') | list == expected
+          - nft is search('(?m)^table inet preview_isolation\ndelete table inet preview_isolation\n')
+        fail_msg: "{{ nft }}"
+      vars:
+        ci_previews_enabled: true
+        ci_previews_networks: [luotsi, site]
+        nft: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/preview-isolation.nft.j2') }}"
+        rules: "{{ nft.splitlines() | map('trim') | list }}"
+        expected:
+          - iifname "pv-luotsi" oifname "pv-luotsi" return
+          - iifname "pv-site" oifname "pv-site" return
+          - iifname "pv-*" oifname "tailscale0" drop
+          - iifname "pv-*" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } drop
+          - iifname "pv-*" meta nfproto ipv6 drop

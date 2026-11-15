@@ -1,0 +1,18 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# Loads {{ ci_host_preview_isolation_file }} before Docker starts any
+# container, and on every boot.
+[Unit]
+Description=Keep the PR previews on their own network
+DefaultDependencies=no
+Before=network-pre.target docker.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f {{ ci_host_preview_isolation_file }}
+ExecReload=/usr/sbin/nft -f {{ ci_host_preview_isolation_file }}
+
+[Install]
+WantedBy=multi-user.target
