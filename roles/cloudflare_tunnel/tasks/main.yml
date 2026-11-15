@@ -21,6 +21,16 @@
   loop_control:
     label: "{{ item.zone | default('?') }}"
 
+# A production hostname needs a zone to put its DNS record in.
+- name: Check the zones of the production hostnames
+  ansible.builtin.assert:
+    that: cloudflare_tunnel_dns_zones | dict2items | selectattr('value', 'equalto', '') | list | length == 0
+    fail_msg: >-
+      Each name of production_hostnames must be on `domain` or on a zone of
+      preview_zones. On none of them:
+      {{ cloudflare_tunnel_dns_zones | dict2items | selectattr('value', 'equalto', '') | map(attribute='key') | list }}
+    quiet: true
+
 - name: Look up the Cloudflare zone
   ansible.builtin.uri:
     url: "{{ cloudflare_api }}/zones?name={{ domain }}"
@@ -52,6 +62,9 @@
   ansible.builtin.set_fact:
     cloudflare_extra_zone_ids: >-
       {{ dict(cloudflare_extra_zone_lookup.results | map(attribute='item.zone')
+              | zip(cloudflare_extra_zone_lookup.results | map(attribute='json.result.0.id'))) }}
+    cloudflare_extra_zone_ids_lower: >-
+      {{ dict(cloudflare_extra_zone_lookup.results | map(attribute='item.zone') | map('lower')
               | zip(cloudflare_extra_zone_lookup.results | map(attribute='json.result.0.id'))) }}
 
 - name: Look up the tunnel
@@ -110,14 +123,6 @@
   changed_when: true
   when: cloudflare_ingress_current != cloudflare_ingress_wanted
 
-- name: Point DNS at the tunnel
-  ansible.builtin.include_tasks: dns.yml
-  loop: "{{ cloudflare_tunnel_dns_names }}"
-  loop_control:
-    loop_var: dns_name
-  vars:
-    dns_zone_id: "{{ cloudflare_zone_id }}"
-
 # The team domain issues the Access tokens and publishes the keys that sign
 # them; preview-access (roles/preview_access) checks both on this host.
 - name: Look up the Access team domain
@@ -155,9 +160,22 @@
     loop_var: access_zone
     label: "{{ access_zone.zone }}"
 
+# After Access, so a name on one of preview_zones is never reachable without
+# the login. Each record goes in the zone of its name.
+- name: Point DNS at the tunnel
+  ansible.builtin.include_tasks: dns.yml
+  loop: "{{ cloudflare_tunnel_dns_names }}"
+  loop_control:
+    loop_var: dns_name
+  vars:
+    dns_zone_id: >-
+      {{ cloudflare_zone_id if cloudflare_tunnel_dns_zones[dns_name] == domain | lower
+         else cloudflare_extra_zone_ids_lower[cloudflare_tunnel_dns_zones[dns_name]] }}
+
+# The zones whose previews ci-1 serves get their wildcard from roles/ci_previews.
 - name: Point the other preview zones at the tunnel
   ansible.builtin.include_tasks: dns.yml
-  loop: "{{ cloudflare_extra_zones }}"
+  loop: "{{ cloudflare_local_zones }}"
   loop_control:
     loop_var: dns_zone
     label: "{{ dns_zone.wildcard }}"

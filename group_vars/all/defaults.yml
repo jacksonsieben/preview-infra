@@ -23,6 +23,9 @@ preview_wildcard: "*.{{ domain }}"
 #
 # Each gets a tunnel route to Traefik and a proxied CNAME, which replaces any
 # record the name had. Then give the application that domain in Coolify.
+# A name may be on `domain` or on a zone of preview_zones (still behind its
+# Access login). On a zone whose previews moved to ci-1 (ci_previews_zones),
+# list here everything this host still serves there: main.<zone>, for one.
 production_hostnames: []
 
 # ---------------------------------------------------------------------------
@@ -270,3 +273,58 @@ ci_host_runner_labels: [self-hosted, linux, ARM64, ci-1]
 ci_host_runner_cpu_quota: 200%
 ci_host_runner_memory_max: 8G
 ci_host_runner_min_free_disk_gb: 20
+
+# ---------------------------------------------------------------------------
+# PR previews on ci-1 (README, Previews on ci-1)
+#
+# The Coolify of the preview host builds and runs the PR previews of some
+# apps on ci-1, a remote server it reaches over SSH through the tailnet, and
+# ci-1 publishes them through a Cloudflare tunnel of its own. No PR code runs
+# on the preview host. Production stays where it is.
+# ---------------------------------------------------------------------------
+ci_previews_enabled: false
+
+# The zones whose PR previews ci-1 serves: `domain` and/or zones of
+# preview_zones. Their wildcard moves from the preview host's tunnel to
+# ci-1's, and ci-1 answers only for PR previews there (pr-<n>.<zone> and
+# pr-<n>-<name>.<zone>): any other name gets 403. Whatever else the preview
+# host serves on such a zone goes in production_hostnames first, which keeps
+# a route and a DNS record of its own here.
+ci_previews_zones: []
+
+# The hosts ci-1 serves on each of those zones: this regular expression,
+# followed by the zone.
+ci_previews_host_pattern: '^pr-[0-9]+(-[a-z0-9]+)*\.'
+
+# ci-1's own tunnel. Never the preview host's: two hosts on one tunnel split
+# its traffic between them.
+ci_previews_tunnel_name: ci-1-previews
+
+# ci-1 as the server is named in Coolify (Servers → + Add).
+ci_previews_coolify_server: ci-1
+
+# Coolify logs in to ci-1 as root, with a key, from the preview host's
+# tailnet address only (`tailscale ip -4` on the preview host). The key is the
+# public half of the private key ci-1 has in Coolify (Keys & Tokens).
+ci_previews_coolify_address: ""
+ci_previews_coolify_key: ""
+
+# One Docker network per app on ci-1, its Coolify destination: an entry
+# `luotsi` makes the network previews-luotsi on the bridge pv-luotsi (at most
+# 12 characters: a-z, 0-9, -). A preview reaches its own network and the
+# internet; never the host, the tailnet, the runners' networks or another
+# app's previews (README, Previews on ci-1).
+ci_previews_networks: []
+
+# Each preview's limits, unless its preview_apps entry sets cpus or memory.
+# Coolify applies them to every preview of the app. No swap.
+ci_previews_cpus: "1"
+ci_previews_memory: 1g
+
+# At most this many previews run on ci-1 at once, all apps together. Past it,
+# preview-limit stops the ones deployed longest ago; pushing to their PR (or
+# Redeploy in Coolify) starts them again.
+ci_previews_max: 3
+
+# Builds at once on ci-1 (Coolify's Concurrent Builds for that server).
+ci_previews_concurrent_builds: 1
