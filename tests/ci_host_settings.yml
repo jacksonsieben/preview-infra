@@ -140,5 +140,6 @@
           - iifname "pv-luotsi" oifname "pv-luotsi" return
           - iifname "pv-site" oifname "pv-site" return
           - iifname "pv-*" oifname "tailscale0" drop
+          - iifname "pv-*" ip daddr { 169.254.169.254 } meta l4proto { tcp, udp } th dport 53 return
           - iifname "pv-*" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } drop
           - iifname "pv-*" meta nfproto ipv6 drop

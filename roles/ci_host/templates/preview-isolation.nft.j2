@@ -20,6 +20,9 @@ table inet preview_isolation {
 {% endfor %}
 {% if ci_host_preview_bridges %}
 		iifname "pv-*" oifname "{{ ci_host_tailnet_interface }}" drop
+{% if ci_host_preview_dns %}
+		iifname "pv-*" ip daddr { {{ ci_host_preview_dns | join(', ') }} } meta l4proto { tcp, udp } th dport 53 return
+{% endif %}
 		iifname "pv-*" ip daddr { {{ ci_host_preview_blocked_v4 | join(', ') }} } drop
 		# Previews have no IPv6 network.
 		iifname "pv-*" meta nfproto ipv6 drop

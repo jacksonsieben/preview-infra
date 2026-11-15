@@ -36,6 +36,10 @@ ci_host_preview_bridges: >-
   {{ ci_previews_networks | map('regex_replace', '^', 'pv-') | list
      if ci_previews_enabled | default(false) | bool else [] }}
 ci_host_preview_blocked_v4: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+# Except DNS (port 53) to Oracle's resolver: Docker's embedded DNS may send a
+# container's lookups from the container's own namespace. The instance
+# metadata, on port 80 of the same address, stays out of reach.
+ci_host_preview_dns: [169.254.169.254]
 ci_host_preview_isolation_file: /etc/preview-infra/preview-isolation.nft
 
 ci_host_swap_file: /swapfile
