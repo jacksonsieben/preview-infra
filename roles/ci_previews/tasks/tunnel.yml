@@ -8,6 +8,10 @@
 # (ci_previews_kept_records) must have DNS records of their own first, or they
 # would follow the wildcard: the run stops before that.
 #
+# A tailnet-only zone (ci_previews_tailnet_zones) gets no route: its wildcard
+# is an unproxied A record to this host's tailnet address instead. With no
+# other zone, there is no tunnel to run, and cloudflared is taken down.
+#
 # Every API call runs on the controller, with the API token; this host only
 # gets the tunnel's token.
 
@@ -50,59 +54,62 @@
         fail_msg: "The zones of ci_previews_zones are on several Cloudflare accounts: {{ ci_previews_accounts }}"
         quiet: true
 
-    - name: Look up ci-1's tunnel
-      ansible.builtin.uri:
-        url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel?name={{ ci_previews_tunnel_name | urlencode }}&is_deleted=false"
-        headers: "{{ ci_previews_cf_headers }}"
-      register: ci_previews_tunnel_lookup
+    - name: Set up ci-1's tunnel
+      when: ci_previews_tunnel_zones | length > 0
+      block:
+        - name: Look up ci-1's tunnel
+          ansible.builtin.uri:
+            url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel?name={{ ci_previews_tunnel_name | urlencode }}&is_deleted=false"
+            headers: "{{ ci_previews_cf_headers }}"
+          register: ci_previews_tunnel_lookup
 
-    - name: Create ci-1's tunnel
-      ansible.builtin.uri:
-        url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel"
-        method: POST
-        headers: "{{ ci_previews_cf_headers }}"
-        body_format: json
-        body:
-          name: "{{ ci_previews_tunnel_name }}"
-          config_src: cloudflare
-      register: ci_previews_tunnel_created
-      changed_when: true
-      when: ci_previews_tunnel_lookup.json.result | length == 0
+        - name: Create ci-1's tunnel
+          ansible.builtin.uri:
+            url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel"
+            method: POST
+            headers: "{{ ci_previews_cf_headers }}"
+            body_format: json
+            body:
+              name: "{{ ci_previews_tunnel_name }}"
+              config_src: cloudflare
+          register: ci_previews_tunnel_created
+          changed_when: true
+          when: ci_previews_tunnel_lookup.json.result | length == 0
 
-    - name: Remember ci-1's tunnel id
-      ansible.builtin.set_fact:
-        ci_previews_tunnel_id: >-
-          {{ (ci_previews_tunnel_created.json.result
-              if ci_previews_tunnel_created is not skipped
-              else ci_previews_tunnel_lookup.json.result[0]).id }}
+        - name: Remember ci-1's tunnel id
+          ansible.builtin.set_fact:
+            ci_previews_tunnel_id: >-
+              {{ (ci_previews_tunnel_created.json.result
+                  if ci_previews_tunnel_created is not skipped
+                  else ci_previews_tunnel_lookup.json.result[0]).id }}
 
-    - name: Read ci-1's tunnel routes
-      ansible.builtin.uri:
-        url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel/{{ ci_previews_tunnel_id }}/configurations"
-        headers: "{{ ci_previews_cf_headers }}"
-      register: ci_previews_tunnel_config
+        - name: Read ci-1's tunnel routes
+          ansible.builtin.uri:
+            url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel/{{ ci_previews_tunnel_id }}/configurations"
+            headers: "{{ ci_previews_cf_headers }}"
+          register: ci_previews_tunnel_config
 
-    # Cloudflare adds defaults to stored rules, so compare only the fields set here.
-    - name: Set ci-1's tunnel routes
-      ansible.builtin.uri:
-        url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel/{{ ci_previews_tunnel_id }}/configurations"
-        method: PUT
-        headers: "{{ ci_previews_cf_headers }}"
-        body_format: json
-        body:
-          config:
-            ingress: "{{ ci_previews_ingress }}"
-      changed_when: true
-      when: current != wanted
-      vars:
-        current: >-
-          {%- for r in (ci_previews_tunnel_config.json.result.config | default({}, true)).ingress | default([]) -%}
-          {{ r.hostname | default('') }}|{{ r.path | default('') }}|{{ r.service }};
-          {%- endfor -%}
-        wanted: >-
-          {%- for r in ci_previews_ingress -%}
-          {{ r.hostname | default('') }}|{{ r.path | default('') }}|{{ r.service }};
-          {%- endfor -%}
+        # Cloudflare adds defaults to stored rules, so compare only the fields set here.
+        - name: Set ci-1's tunnel routes
+          ansible.builtin.uri:
+            url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel/{{ ci_previews_tunnel_id }}/configurations"
+            method: PUT
+            headers: "{{ ci_previews_cf_headers }}"
+            body_format: json
+            body:
+              config:
+                ingress: "{{ ci_previews_ingress }}"
+          changed_when: true
+          when: current != wanted
+          vars:
+            current: >-
+              {%- for r in (ci_previews_tunnel_config.json.result.config | default({}, true)).ingress | default([]) -%}
+              {{ r.hostname | default('') }}|{{ r.path | default('') }}|{{ r.service }};
+              {%- endfor -%}
+            wanted: >-
+              {%- for r in ci_previews_ingress -%}
+              {{ r.hostname | default('') }}|{{ r.path | default('') }}|{{ r.service }};
+              {%- endfor -%}
 
     # --- the Access check on this host ---------------------------------------
 
@@ -113,7 +120,7 @@
         url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/access/organizations"
         headers: "{{ ci_previews_cf_headers }}"
       register: ci_previews_access_org
-      when: preview_zones | length > 0
+      when: ci_previews_protected_zones | length > 0
 
     - name: Look up the Access applications of preview_zones
       ansible.builtin.uri:
@@ -125,13 +132,14 @@
       loop_control:
         label: "{{ item.zone }}"
       register: ci_previews_access_apps
+      when: item.zone | lower in ci_previews_protected_zones
 
     - name: Remember the Access settings
       ansible.builtin.set_fact:
         cloudflare_access_team_domain: "{{ ci_previews_access_org.json.result.auth_domain | default('') if ci_previews_access_org is not skipped else '' }}"
         cloudflare_access_auds: >-
           {%- set auds = {} -%}
-          {%- for lookup in ci_previews_access_apps.results -%}
+          {%- for lookup in ci_previews_access_apps.results | rejectattr('skipped', 'defined') -%}
           {%- set app = lookup.json.result | default([], true) | selectattr('name', '==', 'preview-infra: ' ~ lookup.item.zone ~ ' previews') | first | default({}) -%}
           {%- if app.aud | default('') -%}
           {%- set _ = auds.update({lookup.item.zone | lower: [app.aud]}) -%}
@@ -143,7 +151,7 @@
       ansible.builtin.assert:
         that:
           - cloudflare_access_auds.keys() | list | sort == ci_previews_protected_zones | sort
-          - preview_zones | length == 0 or cloudflare_access_team_domain is match('^[a-z0-9.-]+$')
+          - ci_previews_protected_zones | length == 0 or cloudflare_access_team_domain is match('^[a-z0-9.-]+$')
         fail_msg: >-
           Missing Access applications for
           {{ ci_previews_protected_zones | difference(cloudflare_access_auds.keys() | list) }},
@@ -201,10 +209,55 @@
         label: "*.{{ item.item }}"
       changed_when: true
       when: >-
-        not item.json.result
+        item.item in ci_previews_tunnel_zones
+        and (not item.json.result
         or item.json.result[0].type != 'CNAME'
         or item.json.result[0].content != ci_previews_tunnel_id ~ '.cfargotunnel.com'
-        or not item.json.result[0].proxied
+        or not item.json.result[0].proxied)
+
+    - name: Check the wildcards of the tailnet-only zones
+      ansible.builtin.assert:
+        that:
+          - ci_previews_tailnet_address is match('^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$')
+          - item.json.result | default([]) | length <= 1
+        fail_msg: >-
+          *.{{ item.item }} must point at ci-1's tailnet IPv4 (read
+          '{{ ci_previews_tailnet_address }}') and have one DNS record at most
+          (it has {{ item.json.result | default([]) | length }}): remove the
+          others in Cloudflare's dashboard and rerun.
+        quiet: true
+      loop: "{{ ci_previews_wildcard_lookup.results }}"
+      loop_control:
+        label: "*.{{ item.item }}"
+      when: item.item in ci_previews_tailnet_zones
+
+    # Unproxied: Cloudflare only answers with the address, and only the
+    # tailnet reaches it.
+    - name: Point the wildcards of the tailnet-only zones at ci-1's tailnet address
+      ansible.builtin.uri:
+        url: >-
+          {{ ci_previews_cloudflare_api }}/zones/{{ ci_previews_zone_ids[item.item] }}/dns_records{{
+             '/' ~ item.json.result[0].id if item.json.result else '' }}
+        method: "{{ 'PUT' if item.json.result else 'POST' }}"
+        headers: "{{ ci_previews_cf_headers }}"
+        body_format: json
+        body:
+          type: A
+          name: "*.{{ item.item }}"
+          content: "{{ ci_previews_tailnet_address }}"
+          proxied: false
+          ttl: 1
+          comment: Managed by preview-infra (ci-1's PR previews, tailnet only)
+      loop: "{{ ci_previews_wildcard_lookup.results }}"
+      loop_control:
+        label: "*.{{ item.item }}"
+      changed_when: true
+      when: >-
+        item.item in ci_previews_tailnet_zones
+        and (not item.json.result
+        or item.json.result[0].type != 'A'
+        or item.json.result[0].content != ci_previews_tailnet_address
+        or item.json.result[0].proxied)
 
     - name: Read ci-1's tunnel token
       ansible.builtin.uri:
@@ -212,33 +265,41 @@
         headers: "{{ ci_previews_cf_headers }}"
       register: ci_previews_tunnel_token
       no_log: true
+      when: ci_previews_tunnel_zones | length > 0
 
 # --- cloudflared on this host ------------------------------------------------
 
-- name: Create the cloudflared directory
-  ansible.builtin.file:
-    path: "{{ ci_previews_cloudflared_dir }}"
-    state: directory
-    mode: "0750"
+- name: Take ci-1's cloudflared down, with no zone on the tunnel
+  ansible.builtin.include_tasks: cloudflared_down.yml
+  when: ci_previews_tunnel_zones | length == 0
 
-- name: Write the tunnel token
-  ansible.builtin.copy:
-    content: "TUNNEL_TOKEN={{ ci_previews_tunnel_token.json.result }}\n"
-    dest: "{{ ci_previews_cloudflared_dir }}/.env"
-    mode: "0600"
-  no_log: true
-  notify: Restart ci-1's cloudflared
+- name: Run ci-1's cloudflared
+  when: ci_previews_tunnel_zones | length > 0
+  block:
+    - name: Create the cloudflared directory
+      ansible.builtin.file:
+        path: "{{ ci_previews_cloudflared_dir }}"
+        state: directory
+        mode: "0750"
 
-- name: Write the cloudflared compose file
-  ansible.builtin.template:
-    src: compose.yml.j2
-    dest: "{{ ci_previews_cloudflared_dir }}/compose.yml"
-    mode: "0644"
-  notify: Restart ci-1's cloudflared
+    - name: Write the tunnel token
+      ansible.builtin.copy:
+        content: "TUNNEL_TOKEN={{ ci_previews_tunnel_token.json.result }}\n"
+        dest: "{{ ci_previews_cloudflared_dir }}/.env"
+        mode: "0600"
+      no_log: true
+      notify: Restart ci-1's cloudflared
 
-- name: Start cloudflared
-  ansible.builtin.command:
-    cmd: docker compose up -d
-    chdir: "{{ ci_previews_cloudflared_dir }}"
-  register: ci_previews_cloudflared_up
-  changed_when: "'Started' in ci_previews_cloudflared_up.stderr or 'Recreated' in ci_previews_cloudflared_up.stderr"
+    - name: Write the cloudflared compose file
+      ansible.builtin.template:
+        src: compose.yml.j2
+        dest: "{{ ci_previews_cloudflared_dir }}/compose.yml"
+        mode: "0644"
+      notify: Restart ci-1's cloudflared
+
+    - name: Start cloudflared
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ ci_previews_cloudflared_dir }}"
+      register: ci_previews_cloudflared_up
+      changed_when: "'Started' in ci_previews_cloudflared_up.stderr or 'Recreated' in ci_previews_cloudflared_up.stderr"

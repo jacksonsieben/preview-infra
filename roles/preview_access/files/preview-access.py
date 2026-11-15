@@ -13,6 +13,12 @@ With `hosts` in the configuration (the remote host, which serves PR
 previews only), a host must also match one of those regular expressions,
 whole and ignoring case, or it is refused before anything else.
 
+A host in one of `tailnet_zones` (tailnet-only zones, never behind Access)
+passes without a token, but only on a request that did not come through
+Cloudflare: one that carries Cf-Connecting-Ip, which Cloudflare's edge sets on
+every request it proxies and cloudflared passes on, is refused. Those zones
+are reached on the tailnet, straight to Traefik; a tunnel never serves them.
+
 Answers 200 (pass) or 403 (refused), which Traefik returns as is.
 
     python3 preview-access.py config.json
@@ -22,9 +28,11 @@ config.json, written by the preview_access role:
     {"listen": ["0.0.0.0", 9180],
      "issuer": "https://<team>.cloudflareaccess.com",
      "zones": {"example.dev": ["<aud tag of the zone's Access application>"]},
-     "hosts": ["^pr-[0-9]+\\.example\\.dev$"]}
+     "hosts": ["^pr-[0-9]+\\.example\\.dev$"],
+     "tailnet_zones": ["example.net"]}
 
-`hosts` is optional; without it every host is served.
+`hosts` and `tailnet_zones` are optional; without `hosts` every host is
+served.
 
 Standard library only. The keys come from <issuer>/cdn-cgi/access/certs,
 fetched at start, every hour, and again when a token names an unknown key
@@ -60,6 +68,8 @@ SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
 DENIED = b"Forbidden: this preview needs a Cloudflare Access login.\n"
 NOT_SERVED = b"Forbidden: this host serves pull request previews only.\n"
 HOST_NOT_SERVED = "host not served here"
+TAILNET_ONLY = b"Forbidden: this host is served on the tailnet only.\n"
+NOT_FROM_TAILNET = "tailnet-only zone, request came through Cloudflare"
 
 
 def log(message):
@@ -167,11 +177,17 @@ def served(host, hosts):
     return not hosts or any(pattern.fullmatch(host) for pattern in hosts)
 
 
-def check(host, token, zones, issuer, keys, now, hosts=()):
-    """(allowed, reason) for a request to `host` carrying `token`."""
+def check(host, token, zones, issuer, keys, now, hosts=(), tailnet_zones=(), via_cloudflare=False):
+    """(allowed, reason) for a request to `host` carrying `token`.
+
+    `via_cloudflare`: the request carries Cf-Connecting-Ip."""
     host = normalize_host(host)
     if not served(host, hosts):
         return False, HOST_NOT_SERVED
+    if protected_zone(host, tailnet_zones) is not None:
+        if via_cloudflare:
+            return False, NOT_FROM_TAILNET
+        return True, "tailnet only"
     zone = protected_zone(host, zones)
     if zone is None:
         return True, "not protected"
@@ -222,7 +238,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             allowed, reason = check(host, self.headers.get("Cf-Access-Jwt-Assertion"),
                                     self.server.zones, self.server.issuer,
-                                    self.server.keys, time.time(), self.server.hosts)
+                                    self.server.keys, time.time(), self.server.hosts,
+                                    self.server.tailnet_zones,
+                                    self.headers.get("Cf-Connecting-Ip") is not None)
         except Exception as error:  # noqa: BLE001 - refuse rather than drop the connection
             allowed, reason = False, f"error: {error!r}"
         if allowed:
@@ -231,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         log(f"refused {normalize_host(host)}: {reason}")
-        body = NOT_SERVED if reason == HOST_NOT_SERVED else DENIED
+        body = {HOST_NOT_SERVED: NOT_SERVED, NOT_FROM_TAILNET: TAILNET_ONLY}.get(reason, DENIED)
         self.send_response(403)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -258,6 +276,7 @@ def serve(config, keys=None):
     server.issuer = issuer
     server.zones = {zone.lower(): list(auds) for zone, auds in config["zones"].items()}
     server.hosts = [re.compile(pattern, re.IGNORECASE) for pattern in config.get("hosts", [])]
+    server.tailnet_zones = [zone.lower() for zone in config.get("tailnet_zones", [])]
     server.keys = keys or Keys(issuer + "/cdn-cgi/access/certs")
     return server
 
@@ -277,6 +296,8 @@ def main():
         log(f"protecting {', '.join(sorted(server.zones))} with {server.issuer}")
     if server.hosts:
         log(f"serving only {', '.join(p.pattern for p in server.hosts)}")
+    if server.tailnet_zones:
+        log(f"serving {', '.join(sorted(server.tailnet_zones))} on the tailnet only")
     server.serve_forever()
 
 

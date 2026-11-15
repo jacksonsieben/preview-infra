@@ -4,8 +4,8 @@
 # and https entrypoints (--entrypoints.*.http.middlewares, set by the
 # playbook in Coolify's proxy configuration): {{ preview_access_middlewares | join(', ') }}.
 # preview-access refuses requests to {{ preview_access_zones | join(', ') if preview_access_zones else 'no zone' }} without a valid
-# Cloudflare Access token{{ ', and every host that is not a PR preview' if preview_access_hosts else '' }}, and lets
-# every other host through.
+# Cloudflare Access token{{ ', and every host that is not a PR preview' if preview_access_hosts else '' }}{{ (', requests to ' ~ preview_access_tailnet_zones | join(', ') ~ ' that came through Cloudflare') if preview_access_tailnet_zones else '' }},
+# and lets every other host through.
 http:
   middlewares:
     preview-access:
@@ -21,10 +21,14 @@ http:
         customResponseHeaders:
           X-Robots-Tag: "noindex, nofollow"
 {% endif %}
+{% set probe_zones = (preview_access_probe_zones + preview_access_tailnet_zones) | unique %}
+{% if probe_zones %}
   # A route that always exists on each probed zone, for the playbook's check
-  # that Traefik refuses it without a token.
+  # that Traefik refuses it without a token (or, on a tailnet-only zone,
+  # through Cloudflare).
   routers:
     preview-access-probe:
       entryPoints: [http]
-      rule: "{% for zone in preview_access_probe_zones %}{{ ' || ' if not loop.first }}Host(`{{ preview_access_probe }}.{{ zone }}`){% endfor %}"
+      rule: "{% for zone in probe_zones %}{{ ' || ' if not loop.first }}Host(`{{ preview_access_probe }}.{{ zone }}`){% endfor %}"
       service: noop@internal
+{% endif %}

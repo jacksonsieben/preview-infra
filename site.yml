@@ -106,8 +106,9 @@
           - "Build Pack: Dockerfile. Ports Exposes: {{ item.port }}"
           # The app on ci-1 is never deployed itself, only its PR previews:
           # its domain only gives Coolify the scheme of the preview URLs, and
-          # ci-1 refuses it (not a PR preview).
-          - "Domains: http://{{ ('previews' if item.server is defined else 'main') ~ suffix }}.{{ item.zone }}"
+          # ci-1 refuses it (not a PR preview). https on a tailnet-only zone,
+          # where Traefik itself has the certificate; http behind the tunnel.
+          - "Domains: {{ 'https' if item.zone | lower in preview_tailnet_zones else 'http' }}://{{ ('previews' if item.server is defined else 'main') ~ suffix }}.{{ item.zone }}"
           - "Health check: on, path {{ item.healthcheck_path }}, port {{ item.port }}"
           - "Persistent storage: {{ ('volume mounted at ' ~ item.data_path) if item.data_path | default('') else 'none' }}"
           - >-

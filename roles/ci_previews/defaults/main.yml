@@ -14,10 +14,16 @@ ci_previews_probe: preview-infra-check
 
 ci_previews_zone_names: "{{ ci_previews_zones | map('lower') | list }}"
 
-# ci-1's tunnel: each zone's wildcard to Coolify's Traefik on 127.0.0.1:80,
-# which answers for PR previews only (preview-access, preview_access_hosts).
+# The zones ci-1 serves on the tailnet only (preview_zones, `tailnet: true`),
+# and those it serves through its tunnel.
+ci_previews_tailnet_zones: "{{ ci_previews_zone_names | select('in', preview_tailnet_zones) | list }}"
+ci_previews_tunnel_zones: "{{ ci_previews_zone_names | reject('in', preview_tailnet_zones) | list }}"
+
+# ci-1's tunnel: each tunnel zone's wildcard to Coolify's Traefik on
+# 127.0.0.1:80, which answers for PR previews only (preview-access,
+# preview_access_hosts). The tailnet-only zones get no route.
 ci_previews_ingress: >-
-  {{ ci_previews_zone_names | map('regex_replace', '^', '*.') | map('community.general.dict_kv', 'hostname')
+  {{ ci_previews_tunnel_zones | map('regex_replace', '^', '*.') | map('community.general.dict_kv', 'hostname')
      | map('combine', {'service': 'http://127.0.0.1:80'}) | list
      + [{'service': 'http_status:404'}] }}
 
@@ -29,16 +35,32 @@ ci_previews_hosts: >-
   {%- endfor -%}
   {{ hosts }}
 
-# The zones of preview_zones (behind Access) and the others (public).
-ci_previews_protected_zones: "{{ preview_zones | map(attribute='zone') | map('lower') | list }}"
-ci_previews_public_zones: "{{ ci_previews_zone_names | difference(ci_previews_protected_zones) }}"
+# The zones of preview_zones behind Access, and the tunnel zones that are not
+# (public: `domain`). Tailnet-only zones are neither.
+ci_previews_protected_zones: "{{ preview_protected_zones }}"
+ci_previews_public_zones: "{{ ci_previews_tunnel_zones | difference(ci_previews_protected_zones) }}"
+
+# Port 443 on ci-1's tailnet address, handed by Tailscale Serve to Traefik on
+# 127.0.0.1:443, for the tailnet-only zones.
+ci_previews_tailnet_port: 443
+ci_previews_tailnet_target: 127.0.0.1:443
+
+# What Tailscale Serve forwards that port to now, from `tailscale serve status --json`.
+ci_previews_serve_forward: >-
+  {{ (((ci_previews_serve.stdout | default('{}', true) | from_json).TCP | default({}, true))[ci_previews_tailnet_port | string]
+      | default({})).TCPForward | default('') }}
+
+# ci-1's tailnet IPv4, read by the ci_host role.
+ci_previews_tailnet_address: "{{ ci_host_tailnet_ips.stdout_lines | select('match', '^100\\.') | first }}"
 
 # The names the preview host keeps on ci-1's zones, each with its zone (the
 # longest that matches): its wildcard moves here, so each needs a DNS record
 # of its own first (cloudflare_tunnel role, production_hostnames).
 ci_previews_kept_records: >-
   {%- set records = [] -%}
-  {%- for name in ([coolify_hostname] + production_hostnames) | map('lower') | unique -%}
+  {%- for name in ([coolify_hostname] + production_hostnames
+                    + ([coolify_dashboard_hostname] if coolify_dashboard == 'tailscale' and coolify_dashboard_hostname else []))
+                   | map('lower') | unique -%}
   {%- set ns = namespace(zone='') -%}
   {%- for zone in ci_previews_zone_names if name == zone or name.endswith('.' ~ zone) -%}
   {%- if zone | length > ns.zone | length %}{% set ns.zone = zone %}{% endif -%}
@@ -54,6 +76,9 @@ ci_previews_docker_networks: >-
   {{ ci_previews_networks | map('regex_replace', '^', 'previews-') | list }}
 
 # ci-1 in Coolify's database, for the preview host's tinker tasks.
+# ci-1 in the inventory, for the checks the preview host's play makes there.
+ci_previews_host: "{{ groups['ci'] | default(['ci-1'], true) | first }}"
+
 ci_previews_coolify_server_php: "App\\Models\\Server::where('name', '{{ ci_previews_coolify_server }}')->firstOrFail()"
 
 # The line of root's authorized_keys that lets Coolify in: its key, from the

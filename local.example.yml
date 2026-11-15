@@ -11,6 +11,11 @@ domain: example.com
 
 # tailscale (dashboard on your tailnet only) or public (through the tunnel).
 coolify_dashboard: tailscale
+# With tailscale: the dashboard's name, on a tailnet-only zone (README, Step 3
+# and Tailnet-only zones). Traefik needs a Cloudflare token for DNS-01 in
+# coolify_dns_token_file (/etc/preview-infra/cloudflare-dns-token), which you
+# put there yourself.
+# coolify_dashboard_hostname: coolify.example.dev
 
 # 1Password references, if you keep the secrets there. Leave them out and set
 # CLOUDFLARE_API_TOKEN, COOLIFY_ROOT_USERNAME, COOLIFY_ROOT_EMAIL and
@@ -48,6 +53,13 @@ coolify_apps:
 # preview_access_emails: [you@example.com]
 # preview_zones:
 #   - zone: example.dev
+#
+# Or a zone served on your tailnet only, with no tunnel and no Access login:
+# its names point at a tailnet address and Traefik gets its certificates
+# through DNS-01 (README, Tailnet-only zones).
+# preview_zones:
+#   - zone: example.dev
+#     tailnet: true
 
 # Apps created by hand in Coolify, for previews on other zones; the playbook
 # prints what to enter. A repository is in coolify_apps or here, not both.
@@ -98,6 +110,9 @@ coolify_apps:
 # ci_previews_max: 3                             # previews running at once
 # ci_previews_cpus: "1"                          # each preview's limits
 # ci_previews_memory: 1g
+# On a tailnet-only zone, ci-1's Traefik needs its own Cloudflare token for
+# DNS-01, which you put on ci-1 yourself (README, Tailnet-only zones):
+# ci_previews_dns_token_file: /etc/preview-infra/cloudflare-dns-token
 # preview_apps:
 #   - name: myapp                  # production, here: no previews
 #     repository: you/myapp

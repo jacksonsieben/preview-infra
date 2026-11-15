@@ -6,7 +6,9 @@
 # token itself: every request goes through preview-access (a forward-auth
 # service on the coolify network), which refuses a host on a protected zone
 # unless the request carries a valid Cf-Access-Jwt-Assertion for that zone's
-# Access application. Hosts on `domain` pass as before.
+# Access application. Hosts on `domain` pass as before. Hosts on a
+# tailnet-only zone pass without a token, unless the request came through
+# Cloudflare (preview_access_tailnet_zones).
 #
 # Needs cloudflare_access_team_domain and cloudflare_access_auds from the
 # cloudflare_tunnel role, which creates the Access applications (on the
@@ -23,13 +25,13 @@
       ansible.builtin.assert:
         that:
           - preview_access_zones | length == 0 or cloudflare_access_team_domain | default('') is match('^[a-z0-9.-]+$')
-          - preview_access_zones == preview_zones | map(attribute='zone') | map('lower') | sort
+          - preview_access_zones == preview_protected_zones | sort
           - cloudflare_access_auds | default({}) | dict2items | map(attribute='value') | map('first') | map('length') | select('equalto', 0) | list | length == 0
-          - preview_access_probe_zones | length > 0
+          - preview_access_probe_zones | length > 0 or preview_access_zones | length == 0
         fail_msg: >-
-          Every zone of preview_zones needs its Access application's audience
-          (AUD) and the Access team domain: run the whole playbook, not this
-          role alone.
+          Every zone of preview_zones but the tailnet-only ones needs its
+          Access application's audience (AUD) and the Access team domain: run
+          the whole playbook, not this role alone.
         quiet: true
 
     - name: Create the preview-access directory
@@ -52,6 +54,7 @@
               'issuer': 'https://' ~ (cloudflare_access_team_domain | default('', true)),
               'zones': cloudflare_access_auds | default({})}
              | combine({'hosts': preview_access_hosts} if preview_access_hosts else {})
+             | combine({'tailnet_zones': preview_access_tailnet_zones} if preview_access_tailnet_zones else {})
              | to_nice_json }}
         dest: "{{ preview_access_dir }}/config.json"
         mode: "0644"
@@ -147,6 +150,23 @@
         label: "curl -H 'Host: {{ preview_access_probe }}.{{ item }}' http://127.0.0.1/"
       register: preview_access_probe_result
       until: preview_access_probe_result is not failed
+      retries: 12
+      delay: 5
+      when: preview_access_proxy.stdout | length > 0
+
+    # As a request through a tunnel would come: refused on a tailnet-only zone.
+    - name: Check that Traefik refuses the tailnet-only zones through Cloudflare
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers:
+          Host: "{{ preview_access_probe }}.{{ item }}"
+          Cf-Connecting-Ip: 192.0.2.1
+        status_code: 403
+      loop: "{{ preview_access_tailnet_zones }}"
+      loop_control:
+        label: "curl -H 'Host: {{ preview_access_probe }}.{{ item }}' -H 'Cf-Connecting-Ip: 192.0.2.1' http://127.0.0.1/"
+      register: preview_access_tailnet_probe
+      until: preview_access_tailnet_probe is not failed
       retries: 12
       delay: 5
       when: preview_access_proxy.stdout | length > 0

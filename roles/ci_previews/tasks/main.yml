@@ -1,7 +1,9 @@
 ---
 # PR previews on ci-1 (README, Previews on ci-1). The preview host's Coolify
 # builds and runs them here, over SSH through the tailnet; this host publishes
-# them through a tunnel of its own and serves nothing else.
+# them through a tunnel of its own, or on the tailnet only (tailnet-only
+# zones: Tailscale Serve's port 443, a DNS-01 wildcard certificate), and
+# serves nothing else.
 #
 #   - Coolify logs in as root, with its key, from the preview host only.
 #   - Each app's previews run on a Docker network of their own, which reaches
@@ -24,7 +26,7 @@
       ansible.builtin.assert:
         that:
           - ci_previews_zone_names | length > 0
-          - ci_previews_zone_names | difference([domain | lower] + ci_previews_protected_zones) | length == 0
+          - ci_previews_zone_names | difference([domain | lower] + ci_previews_protected_zones + preview_tailnet_zones) | length == 0
           - ci_previews_coolify_server is match('^[A-Za-z0-9._-]+$')
           - ci_previews_coolify_address is match('^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$')
           - ci_previews_coolify_key | trim is match('^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+=*( .*)?$')
@@ -41,6 +43,33 @@
           app, a-z, 0-9 and -, at most 12 characters) and ci_previews_max of
           1 or more (README, Previews on ci-1).
         quiet: true
+
+    # The token is the operator's: the playbook never reads it, and Traefik
+    # gets the file mounted (preview host's play, roles/coolify,
+    # proxy_dns01.yml). Without it Docker would mount an empty directory.
+    - name: Look for ci-1's Cloudflare token for DNS-01
+      ansible.builtin.stat:
+        path: "{{ ci_previews_dns_token_file }}"
+        get_checksum: false
+      register: ci_previews_dns_token
+      when: ci_previews_tailnet_zones | length > 0
+
+    - name: Check ci-1's Cloudflare token for DNS-01
+      ansible.builtin.assert:
+        that:
+          - ci_previews_dns_token.stat.exists
+          - ci_previews_dns_token.stat.isreg
+          - ci_previews_dns_token.stat.size > 0
+        fail_msg: >-
+          {{ ci_previews_dns_token_file }} is missing or empty on
+          {{ inventory_hostname }}. Traefik there gets the certificate of
+          {{ ci_previews_tailnet_zones | map('regex_replace', '^', '*.') | join(', ') }}
+          through Cloudflare DNS-01 with a token you put in that file
+          yourself: a Cloudflare API token with Zone > DNS > Edit and
+          Zone > Zone > Read on those zones only, alone in the file, owned
+          by root, mode 0600 (README, Tailnet-only zones).
+        quiet: true
+      when: ci_previews_tailnet_zones | length > 0
 
     # --- Coolify's access ----------------------------------------------------
 
@@ -147,10 +176,45 @@
       vars:
         preview_access_wanted: true
         preview_access_hosts: "{{ ci_previews_hosts }}"
+        preview_access_tailnet_zones: "{{ ci_previews_tailnet_zones }}"
         preview_access_probe_zones: "{{ (ci_previews_protected_zones + ci_previews_zone_names) | unique | sort }}"
         preview_access_noindex: true
         preview_access_manage_proxy: false
         preview_access_probe: "{{ ci_previews_probe }}"
+
+    # --- the tailnet ---------------------------------------------------------
+
+    # Port 443 of ci-1's tailnet address, as raw TCP, to Traefik on
+    # 127.0.0.1:443 (as on the preview host, roles/tailscale_dashboard).
+    # Traefik keeps listening on loopback only: nothing else reaches it, and
+    # the tailnet's ACL decides who reaches this port (README, Tailscale
+    # ACL).
+    - name: Read ci-1's Tailscale Serve settings
+      ansible.builtin.command: tailscale serve status --json
+      register: ci_previews_serve
+      changed_when: false
+
+    - name: Forward the tailnet's port 443 to Traefik
+      ansible.builtin.command:
+        argv:
+          - tailscale
+          - serve
+          - --bg
+          - "--tcp={{ ci_previews_tailnet_port }}"
+          - "tcp://{{ ci_previews_tailnet_target }}"
+      changed_when: true
+      when:
+        - ci_previews_tailnet_zones | length > 0
+        - ci_previews_serve_forward != ci_previews_tailnet_target
+
+    # Only the forward set above: one set by hand to elsewhere stays.
+    - name: Stop forwarding the tailnet's port 443, with no tailnet-only zone
+      ansible.builtin.command:
+        argv: [tailscale, serve, "--tcp={{ ci_previews_tailnet_port }}", "off"]
+      changed_when: true
+      when:
+        - ci_previews_tailnet_zones | length == 0
+        - ci_previews_serve_forward == ci_previews_tailnet_target
 
     # --- limits and cleanup --------------------------------------------------
 

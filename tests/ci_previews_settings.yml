@@ -119,3 +119,64 @@
       vars:
         preview_access_zones: [example.dev]
         traefik: "{{ lookup('ansible.builtin.template', '../roles/preview_access/templates/traefik.yaml.j2') | from_yaml }}"
+
+    # A tailnet-only zone on ci-1 (README, Tailnet-only zones): no route on
+    # its tunnel and no Access; its wildcard points at ci-1's tailnet address,
+    # where Tailscale Serve forwards 443 to Traefik.
+    - name: Make the second zone tailnet-only
+      ansible.builtin.set_fact:
+        preview_zones: [{zone: Example.dev, tailnet: true}]
+        coolify_dashboard: tailscale
+        coolify_dashboard_hostname: coolify.example.dev
+        ci_host_tailnet_ips: {stdout_lines: ['100.101.102.104', 'fd7a:115c:a1e0::1']}
+        ci_previews_serve: {stdout: '{"TCP": {"443": {"TCPForward": "127.0.0.1:443"}}}'}
+
+    - name: Check ci-1 with a tailnet-only zone
+      ansible.builtin.assert:
+        that:
+          - ci_previews_tailnet_zones == ['example.dev']
+          - ci_previews_tunnel_zones == ['example.com']
+          - ci_previews_protected_zones == []
+          - ci_previews_public_zones == ['example.com']
+          - ci_previews_ingress == expected
+          - ci_previews_tailnet_address == '100.101.102.104'
+          - ci_previews_serve_forward == ci_previews_tailnet_target
+          - "{'name': 'coolify.example.dev', 'zone': 'example.dev'} in ci_previews_kept_records"
+          # Still served, with no Access token asked for.
+          - "'pr-12.example.dev' is match(ci_previews_hosts[1])"
+        fail_msg: >-
+          Tailnet: {{ ci_previews_tailnet_zones }}. Tunnel: {{ ci_previews_tunnel_zones }}.
+          Routes: {{ ci_previews_ingress }}. Kept: {{ ci_previews_kept_records }}
+      vars:
+        expected:
+          - {hostname: "*.example.com", service: "http://127.0.0.1:80"}
+          - {service: "http_status:404"}
+
+    - name: Check ci-1's Traefik file with a tailnet-only zone
+      ansible.builtin.assert:
+        that:
+          - preview_access_zones == []
+          - preview_access_tailnet_zones == ['example.dev']
+          - traefik.http.routers['preview-access-probe'].rule
+            == 'Host(`preview-infra-check.example.com`) || Host(`preview-infra-check.example.dev`)'
+        fail_msg: "Traefik: {{ traefik }}"
+      vars:
+        preview_access_noindex: true
+        preview_access_hosts: "{{ ci_previews_hosts }}"
+        preview_access_zones: "{{ ci_previews_protected_zones }}"
+        preview_access_tailnet_zones: "{{ ci_previews_tailnet_zones }}"
+        preview_access_probe_zones: "{{ ci_previews_public_zones }}"
+        traefik: "{{ lookup('ansible.builtin.template', '../roles/preview_access/templates/traefik.yaml.j2') | from_yaml }}"
+
+    - name: Make every zone of ci-1 tailnet-only
+      ansible.builtin.set_fact:
+        preview_zones: [{zone: example.dev, tailnet: true}, {zone: example.com, tailnet: true}]
+
+    - name: Check that ci-1 needs no tunnel then
+      ansible.builtin.assert:
+        that:
+          - ci_previews_tailnet_zones == ['example.com', 'example.dev']
+          - ci_previews_tunnel_zones == []
+          - ci_previews_public_zones == []
+          - "ci_previews_ingress == [{'service': 'http_status:404'}]"
+        fail_msg: "Tunnel: {{ ci_previews_tunnel_zones }}. Routes: {{ ci_previews_ingress }}"
