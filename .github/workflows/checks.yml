@@ -53,3 +53,5 @@ jobs:
         run: ansible-playbook tests/ci_previews_coolify.yml
       - name: Preview limit
         run: python3 tests/preview_limit.py
+      - name: Traefik certificates through DNS-01
+        run: ansible-playbook tests/proxy_dns01.yml

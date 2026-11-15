@@ -1,0 +1,218 @@
+---
+# Traefik's certificates through Cloudflare DNS-01 (roles/coolify,
+# tasks/proxy_dns01.yml) against a stand-in for `docker exec coolify ...
+# tinker` that serves a proxy configuration like Coolify's own, with the HTTP
+# challenge and a token written into it by hand. Checks what is saved, that a
+# second run saves nothing, and that a missing token file stops the run before
+# anything is saved. Offline: nothing outside a temporary directory is called
+# or changed.
+#
+#   ansible-playbook tests/proxy_dns01.yml
+
+- name: Traefik's certificates through DNS-01
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    secret: /run/secrets/cloudflare-dns-token
+    coolify_config: |
+      name: coolify-proxy
+      networks:
+        coolify:
+          external: true
+      services:
+        traefik:
+          container_name: coolify-proxy
+          image: 'traefik:v3.1'
+          restart: unless-stopped
+          environment:
+            CF_DNS_API_TOKEN: written-by-hand
+            TZ: UTC
+          extra_hosts:
+            - 'host.docker.internal:host-gateway'
+          networks:
+            - coolify
+          ports:
+            - '127.0.0.1:80:80'
+            - '127.0.0.1:443:443'
+            - '127.0.0.1:443:443/udp'
+            - '127.0.0.1:8080:8080'
+          volumes:
+            - '/var/run/docker.sock:/var/run/docker.sock:ro'
+            - '/data/coolify/proxy:/traefik'
+          command:
+            - '--ping=true'
+            - '--entrypoints.http.address=:80'
+            - '--entrypoints.https.address=:443'
+            - '--entrypoints.https.http.middlewares=preview-access@file'
+            - '--providers.docker=true'
+            - '--certificatesresolvers.letsencrypt.acme.httpchallenge=true'
+            - '--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=http'
+            - '--certificatesresolvers.letsencrypt.acme.storage=/traefik/acme.json'
+          labels:
+            - traefik.enable=true
+  tasks:
+    - name: Make a temporary directory
+      ansible.builtin.tempfile:
+        state: directory
+      register: fake_dir
+
+    # Serves `config` to GetProxyConfiguration and keeps what
+    # SaveProxyConfiguration is given in `saved`; logs each call.
+    - name: Write the stand-in for docker
+      ansible.builtin.copy:
+        dest: "{{ fake_dir.path }}/docker"
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          printf '%s\n' "$*" | tr '\n' ' ' >> "{{ fake_dir.path }}/calls"
+          echo >> "{{ fake_dir.path }}/calls"
+          case "$*" in
+            *SaveProxyConfiguration*)
+              printf '%s' "$*" | sed -n "s/.*base64_decode('\([^']*\)').*/\1/p" | base64 -d > "{{ fake_dir.path }}/saved"
+              echo changed ;;
+            *GetProxyConfiguration*) printf 'config:'; base64 -w0 "{{ fake_dir.path }}/config"; echo ;;
+            *) echo ok ;;
+          esac
+
+    - name: Run the tasks against the stand-in
+      environment:
+        PATH: "{{ fake_dir.path }}:{{ lookup('ansible.builtin.env', 'PATH') }}"
+      vars:
+        calls: "{{ lookup('ansible.builtin.file', fake_dir.path ~ '/calls').splitlines() }}"
+        saved: "{{ lookup('ansible.builtin.file', fake_dir.path ~ '/saved') | from_yaml }}"
+        traefik: "{{ saved.services.traefik }}"
+      block:
+        - name: Write Coolify's proxy configuration
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/config"
+            content: "{{ coolify_config }}"
+
+        - name: Start the log of calls
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/calls"
+            content: ""
+
+        - name: Write a token file
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/token"
+            content: "not-a-token\n"
+            mode: "0600"
+
+        # --- No token file: nothing is read or saved -----------------------
+        - name: Run without the token file
+          block:
+            - name: Run without the token file
+              ansible.builtin.include_role:
+                name: coolify
+                tasks_from: proxy_dns01
+              vars:
+                coolify_proxy_dns_token_file: "{{ fake_dir.path }}/missing"
+                coolify_proxy_host: localhost
+                coolify_proxy_wildcards: []
+
+            - name: Fail, the run should have stopped
+              ansible.builtin.fail:
+                msg: The run went on without the token file.
+          rescue:
+            - name: Check that the missing token file stopped the run
+              ansible.builtin.assert:
+                that:
+                  - ansible_failed_task.name == 'Check the Cloudflare token for DNS-01'
+                  - ansible_failed_result.msg is search(fake_dir.path ~ '/missing is missing or empty')
+                  - calls == []
+                fail_msg: "{{ ansible_failed_task.name }}: {{ ansible_failed_result.msg | default('') }}. Calls: {{ calls }}"
+
+        # --- One certificate per name ---------------------------------------
+        - name: Run on the preview host
+          ansible.builtin.include_role:
+            name: coolify
+            tasks_from: proxy_dns01
+          vars:
+            coolify_proxy_dns_token_file: "{{ fake_dir.path }}/token"
+            coolify_proxy_host: localhost
+            coolify_proxy_wildcards: []
+
+        - name: Check the configuration saved for the preview host
+          ansible.builtin.assert:
+            that:
+              - calls | length == 2
+              - calls[1] is search('StartProxy::run\(\$s, async. false, force. true\)')
+              - calls | select('search', 'Server::find\(0\)') | list | length == 2
+              - traefik.command | select('search', 'httpchallenge') | list == []
+              - traefik.command | select('search', 'tlschallenge') | list == []
+              - traefik.command[-2:] == ['--certificatesresolvers.letsencrypt.acme.dnschallenge=true',
+                                         '--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare']
+              - traefik.command | select('search', '^--entrypoints\.https\.http\.tls\.') | list == []
+              - "'--certificatesresolvers.letsencrypt.acme.storage=/traefik/acme.json' in traefik.command"
+              - "'--entrypoints.https.http.middlewares=preview-access@file' in traefik.command"
+              - traefik.environment == ['TZ=UTC', 'CF_DNS_API_TOKEN_FILE=' ~ secret]
+              - traefik.volumes[-1] == fake_dir.path ~ '/token:' ~ secret ~ ':ro'
+              - traefik.volumes | length == 3
+              - traefik.ports == ['127.0.0.1:80:80', '127.0.0.1:443:443', '127.0.0.1:443:443/udp', '127.0.0.1:8080:8080']
+              - "saved.networks == {'coolify': {'external': true}}"
+              - traefik.labels == ['traefik.enable=true']
+              - "lookup('ansible.builtin.file', fake_dir.path ~ '/saved') is not search('written-by-hand')"
+            fail_msg: "Calls: {{ calls }}. Saved: {{ saved }}"
+
+        - name: Serve what was saved, and forget the calls
+          ansible.builtin.shell: "cp saved config && : > calls"
+          args:
+            chdir: "{{ fake_dir.path }}"
+          changed_when: true
+
+        - name: Run on the preview host again
+          ansible.builtin.include_role:
+            name: coolify
+            tasks_from: proxy_dns01
+          vars:
+            coolify_proxy_dns_token_file: "{{ fake_dir.path }}/token"
+            coolify_proxy_host: localhost
+            coolify_proxy_wildcards: []
+
+        - name: Check that the second run saved nothing
+          ansible.builtin.assert:
+            that: calls | length == 1
+            fail_msg: "Calls: {{ calls }}"
+
+        # --- ci-1: a wildcard per tailnet-only zone ------------------------
+        - name: Serve Coolify's configuration again, and forget the calls
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/{{ item.name }}"
+            content: "{{ item.content }}"
+          loop:
+            - {name: config, content: "{{ coolify_config }}"}
+            - {name: calls, content: ""}
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Run for ci-1
+          ansible.builtin.include_role:
+            name: coolify
+            tasks_from: proxy_dns01
+          vars:
+            coolify_server_php: "App\\Models\\Server::where('name', 'ci-1')->firstOrFail()"
+            coolify_proxy_dns_token_file: "{{ fake_dir.path }}/token"
+            coolify_proxy_host: localhost
+            coolify_proxy_wildcards: [example.com, example.org]
+
+        - name: Check the configuration saved for ci-1
+          ansible.builtin.assert:
+            that:
+              - calls | length == 2
+              - calls | select('search', "Server::where\\('name', 'ci-1'\\)") | list | length == 2
+              - traefik.command | select('search', 'httpchallenge') | list == []
+              - traefik.command[-7:] == [
+                  '--certificatesresolvers.letsencrypt.acme.dnschallenge=true',
+                  '--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare',
+                  '--entrypoints.https.http.tls.certresolver=letsencrypt',
+                  '--entrypoints.https.http.tls.domains[0].main=example.com',
+                  '--entrypoints.https.http.tls.domains[0].sans=*.example.com',
+                  '--entrypoints.https.http.tls.domains[1].main=example.org',
+                  '--entrypoints.https.http.tls.domains[1].sans=*.example.org']
+            fail_msg: "Calls: {{ calls }}. Saved: {{ saved }}"
+      always:
+        - name: Remove the temporary directory
+          ansible.builtin.file:
+            path: "{{ fake_dir.path }}"
+            state: absent
