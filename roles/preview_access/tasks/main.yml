@@ -33,6 +33,9 @@
           Access application's audience (AUD) and the Access team domain: run
           the whole playbook, not this role alone.
         quiet: true
+      # In check mode, an Access application the run would create has no
+      # audience yet: reported, not fatal.
+      ignore_errors: "{{ ansible_check_mode }}"
 
     - name: Create the preview-access directory
       ansible.builtin.file:
@@ -100,6 +103,8 @@
       until: preview_access_ready.rc == 0 and preview_access_ready.stdout in ['200', '403']
       retries: 10
       delay: 3
+      # Check mode starts nothing to wait for.
+      when: not ansible_check_mode
 
     # Traefik's file provider picks up changes to this file by itself.
     - name: Create Traefik's dynamic configuration directory
@@ -126,6 +131,7 @@
     - name: Check whether Coolify's proxy runs here
       ansible.builtin.command: docker ps --quiet --filter name=^coolify-proxy$ --filter status=running
       register: preview_access_proxy
+      check_mode: false
       changed_when: false
 
     - name: Report a proxy that is not running yet

@@ -8,6 +8,7 @@
     headers:
       Authorization: "Bearer {{ cloudflare_api_token }}"
   register: dns_lookup
+  check_mode: false
 
 - name: "Create or update the DNS record for {{ dns_name }}"
   ansible.builtin.uri:

@@ -24,6 +24,7 @@
 - name: Check whether the Coolify proxy is running
   ansible.builtin.command: docker ps --quiet --filter name=^coolify-proxy$ --filter status=running
   register: coolify_proxy_running
+  check_mode: false
   changed_when: false
 
 - name: Start the Coolify proxy

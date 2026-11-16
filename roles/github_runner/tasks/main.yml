@@ -15,6 +15,7 @@
       | grep -o 'github-runner@[^ ]*\.service'
       | sed 's/^github-runner@\(.*\)\.service$/\1/' | sort -u || true
   register: github_runner_existing
+  check_mode: false
   changed_when: false
 
 # Stopping a runner removes its containers and its registration on GitHub. A

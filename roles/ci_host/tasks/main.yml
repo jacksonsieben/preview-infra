@@ -11,11 +11,13 @@
 - name: Read the state of Tailscale
   ansible.builtin.command: tailscale status --json --peers=false
   register: ci_host_tailscale
+  check_mode: false
   changed_when: false
 
 - name: Read the host's tailnet addresses
   ansible.builtin.command: tailscale ip
   register: ci_host_tailnet_ips
+  check_mode: false
   changed_when: false
 
 - name: Read the addresses of this SSH connection
@@ -40,6 +42,7 @@
   # sudo would drop SSH_CONNECTION from the environment.
   become: false
   register: ci_host_ssh
+  check_mode: false
   changed_when: false
 
 - name: Check that the playbook reaches the host through the tailnet

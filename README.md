@@ -157,7 +157,24 @@ ansible-galaxy collection install -r requirements.yml   # once
 ansible-playbook site.yml -K          # -K asks for the sudo password
 ```
 
-It is idempotent; rerun it any time. Afterwards:
+It is idempotent; rerun it any time. To preview a run first, without changing
+anything, add `--check --diff`:
+
+```bash
+ansible-playbook site.yml -K --check --diff               # the preview host
+ansible-playbook site.yml -K --check --diff --limit ci    # ci-1 only
+```
+
+It reads the hosts, Cloudflare, Tailscale and GitHub as a real run does, and
+shows each file, DNS record, route or setting the run would change (*changed*,
+or *skipped* for an API call or a command that only a real run makes). Left
+out: Coolify's applications and their environment variables (reading them
+takes an API token that only a real run creates), and a host without Coolify
+yet, where the check stops early. A check that depends on what the run would
+create first (a new tunnel, Access application or DNS record) is reported as
+*ignored* instead of failing.
+
+Afterwards:
 
 - `https://<coolify_dashboard_hostname>` (from any device on your tailnet)
   and `http://127.0.0.1:8000` (on the host) open the Coolify dashboard. Log
@@ -449,6 +466,9 @@ for real: the checks are `ansible-playbook site.yml --syntax-check` and
 DNS names offline and fails if production's would change, and
 `python3 tests/coolify_env.py`, which runs the `coolify_apps` role against a
 fake Coolify API and checks the environment variables.
+`python3 tests/check_mode.py` checks that every task that only reads
+(`uri` with no `method`, or a `command`/`shell` with `changed_when: false`)
+also runs in check mode (`check_mode: false`), so `--check --diff` works.
 `ansible-playbook tests/coolify_build_limit.yml` checks the build limit task
 against a stand-in for `docker`.
 `ansible-playbook tests/github_runner_settings.yml` checks the runner instance

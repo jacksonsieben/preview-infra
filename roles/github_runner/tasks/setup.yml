@@ -49,6 +49,7 @@
     status_code: [200, 401, 403, 404]
   loop: "{{ github_runner_repos if github_runner_scope == 'repo' else [] }}"
   register: github_runner_repo_lookup
+  check_mode: false
   no_log: true
 
 - name: Refuse public repositories
@@ -71,6 +72,7 @@
     headers: *github_headers
     status_code: [200, 401, 403, 404]
   register: github_runner_group_lookup
+  check_mode: false
   when: github_runner_scope == 'org'
   no_log: true
 
@@ -93,6 +95,7 @@
   ansible.builtin.command:
     cmd: docker info --format {% raw %}'{{ .CgroupDriver }}'{% endraw %}
   register: github_runner_cgroup_driver
+  check_mode: false
   changed_when: false
 
 - name: Check Docker's cgroup driver

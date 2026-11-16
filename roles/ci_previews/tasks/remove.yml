@@ -11,6 +11,7 @@
 - name: Read ci-1's Tailscale Serve settings
   ansible.builtin.command: tailscale serve status --json
   register: ci_previews_serve
+  check_mode: false
   changed_when: false
 
 - name: Stop forwarding the tailnet's port 443 to Traefik

@@ -8,6 +8,7 @@
 - name: Read the Tailscale status
   ansible.builtin.command: tailscale status --json
   register: tailscale_status_raw
+  check_mode: false
   changed_when: false
 
 - name: Remember the tailnet name of this host
@@ -28,6 +29,7 @@
 - name: Read the current Tailscale Serve settings
   ansible.builtin.command: tailscale serve status --json
   register: tailscale_serve_raw
+  check_mode: false
   changed_when: false
 
 # An HTTPS handler on the same port (the old .ts.net dashboard) holds it.

@@ -28,6 +28,7 @@
       - >-
         echo App\Models\Server::where('name', '{{ ci_previews_coolify_server }}')->exists() ? 'found' : 'missing';
   register: ci_previews_coolify_lookup
+  check_mode: false
   changed_when: false
   failed_when: >-
     ci_previews_coolify_lookup.rc != 0
