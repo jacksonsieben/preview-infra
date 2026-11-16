@@ -57,3 +57,5 @@ jobs:
         run: python3 tests/preview_limit.py
       - name: Traefik certificates through DNS-01
         run: ansible-playbook tests/proxy_dns01.yml
+      - name: Traefik certificates through DNS-01, in check mode
+        run: ansible-playbook tests/proxy_dns01_check.yml --check

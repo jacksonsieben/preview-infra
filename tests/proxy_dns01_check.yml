@@ -1,0 +1,111 @@
+---
+# Traefik's certificates through DNS-01 (roles/coolify, tasks/proxy_dns01.yml)
+# in check mode: the proxy's compose file is read directly, nothing goes
+# through Coolify (GetProxyConfiguration may write), and a host whose proxy
+# has no configuration yet is reported, not failed. A stand-in for `docker`
+# logs every call. Offline: nothing outside a temporary directory is called
+# or changed.
+#
+#   ansible-playbook tests/proxy_dns01_check.yml --check
+#
+# The test's own setup runs with check_mode: false; the role's tasks run as
+# they do under `site.yml --check`.
+
+- name: Traefik's certificates through DNS-01, in check mode
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    secret: /run/secrets/cloudflare-dns-token
+    coolify_config: |
+      services:
+        traefik:
+          image: 'traefik:v3.1'
+          environment:
+            CF_DNS_API_TOKEN: written-by-hand
+            TZ: UTC
+          volumes:
+            - '/data/coolify/proxy:/traefik'
+          command:
+            - '--providers.docker=true'
+            - '--certificatesresolvers.letsencrypt.acme.httpchallenge=true'
+            - '--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=http'
+  tasks:
+    - name: Fail, the test runs in check mode only
+      ansible.builtin.fail:
+        msg: "Run it with --check: ansible-playbook tests/proxy_dns01_check.yml --check"
+      when: not ansible_check_mode
+
+    - name: Make a temporary directory
+      ansible.builtin.tempfile:
+        state: directory
+      register: fake_dir
+      check_mode: false
+
+    - name: Run the tasks against the stand-in
+      environment:
+        PATH: "{{ fake_dir.path }}:{{ lookup('ansible.builtin.env', 'PATH') }}"
+      vars:
+        calls: "{{ lookup('ansible.builtin.file', fake_dir.path ~ '/calls').splitlines() }}"
+      block:
+        - name: Write the stand-in for docker, the compose file and a token
+          ansible.builtin.copy:
+            dest: "{{ fake_dir.path }}/{{ item.name }}"
+            content: "{{ item.content }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - name: docker
+              mode: "0755"
+              content: |
+                #!/bin/sh
+                printf '%s\n' "$*" >> "{{ fake_dir.path }}/calls"
+                echo ok
+            - {name: calls, mode: "0600", content: ""}
+            - {name: config, mode: "0600", content: "{{ coolify_config }}"}
+            - {name: token, mode: "0600", content: "not-a-token\n"}
+          loop_control:
+            label: "{{ item.name }}"
+          check_mode: false
+
+        - name: Check the preview host
+          ansible.builtin.include_role:
+            name: coolify
+            tasks_from: proxy_dns01
+          vars:
+            coolify_proxy_dns_token_file: "{{ fake_dir.path }}/token"
+            coolify_proxy_compose_file: "{{ fake_dir.path }}/config"
+            coolify_proxy_host: localhost
+            coolify_proxy_wildcards: []
+
+        - name: Check that the configuration was read and nothing called
+          ansible.builtin.assert:
+            that:
+              - calls == []
+              - coolify_proxy_current.services.traefik.environment.TZ == 'UTC'
+              - coolify_proxy_wanted.services.traefik.environment == ['TZ=UTC', 'CF_DNS_API_TOKEN_FILE=' ~ secret]
+              - coolify_proxy_wanted.services.traefik.command | select('search', 'httpchallenge') | list == []
+              - "lookup('ansible.builtin.file', fake_dir.path ~ '/config') == coolify_config | trim"
+            fail_msg: "Calls: {{ calls }}"
+
+        - name: Check a host whose proxy has no configuration yet
+          ansible.builtin.include_role:
+            name: coolify
+            tasks_from: proxy_dns01
+          vars:
+            coolify_proxy_dns_token_file: "{{ fake_dir.path }}/token"
+            coolify_proxy_compose_file: "{{ fake_dir.path }}/missing"
+            coolify_proxy_host: localhost
+            coolify_proxy_wildcards: []
+
+        - name: Check that it went on, called nothing and wrote no file
+          ansible.builtin.assert:
+            that:
+              - calls == []
+              - not (fake_dir.path ~ '/missing') is exists
+            fail_msg: "Calls: {{ calls }}"
+      always:
+        - name: Remove the temporary directory
+          ansible.builtin.file:
+            path: "{{ fake_dir.path }}"
+            state: absent
+          check_mode: false
