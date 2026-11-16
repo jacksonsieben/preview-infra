@@ -8,6 +8,7 @@
 - name: Take ci-1's cloudflared down
   ansible.builtin.include_tasks: cloudflared_down.yml
 
+# read-only: tailscale serve status.
 - name: Read ci-1's Tailscale Serve settings
   ansible.builtin.command: tailscale serve status --json
   register: ci_previews_serve

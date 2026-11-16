@@ -4,6 +4,7 @@
 # it starts before tailscaled, and lock the host. ufw already drops port 22
 # on the public interface; AllowUsers is the second lock.
 
+# read-only: command -v prints a path.
 - name: Find sshd
   ansible.builtin.shell:
     cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
@@ -21,6 +22,7 @@
     validate: "{{ ci_host_sshd.stdout }} -t -f %s"
   notify: Reload ssh
 
+# read-only: sshd -t only tests the configuration.
 - name: Check the whole sshd configuration
   ansible.builtin.command: "{{ ci_host_sshd.stdout }} -t"
   check_mode: false

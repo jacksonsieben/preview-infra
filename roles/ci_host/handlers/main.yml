@@ -16,9 +16,15 @@
   ansible.builtin.systemd_service:
     name: memory-floor
     state: restarted
+  # A check run on a new host has not written the unit yet: reported as
+  # ignored. A real run fails as before.
+  ignore_errors: "{{ ansible_check_mode }}"
 
 # A oneshot: restarting it loads the rules again (nft -f replaces the table).
 - name: Restart preview isolation
   ansible.builtin.systemd_service:
     name: preview-isolation
     state: restarted
+  # A check run on a new host has not written the unit yet: reported as
+  # ignored. A real run fails as before.
+  ignore_errors: "{{ ansible_check_mode }}"

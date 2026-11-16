@@ -212,6 +212,7 @@
 
 # --- tailnet-only zones ------------------------------------------------------
 
+# read-only: tailscale ip prints the address.
 - name: Read this host's tailnet address
   ansible.builtin.command: tailscale ip -4
   register: cloudflare_tailnet_ip

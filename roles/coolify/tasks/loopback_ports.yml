@@ -21,6 +21,7 @@
 # Traefik (tailscale_dashboard role). Traefik binds 127.0.0.1 (above), so the
 # two don't collide: start it past the check.
 # Once running, Docker restarts it on boot.
+# read-only: docker ps.
 - name: Check whether the Coolify proxy is running
   ansible.builtin.command: docker ps --quiet --filter name=^coolify-proxy$ --filter status=running
   register: coolify_proxy_running

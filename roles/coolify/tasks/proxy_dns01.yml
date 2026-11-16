@@ -8,6 +8,12 @@
 # The token stays in its file on coolify_proxy_host: checked here, mounted
 # into Traefik, never read. The configuration is read and written with
 # no_log, because a token written into it by hand would be in it.
+#
+# In check mode nothing goes through Coolify: GetProxyConfiguration may write
+# a default file on the server and save it in Coolify's database. The check
+# reads the proxy's compose file (coolify_proxy_compose_file) directly, which
+# is what GetProxyConfiguration returns when the file is there, and reports
+# what the run would save.
 
 - name: Look for the Cloudflare token for DNS-01
   ansible.builtin.stat:
@@ -45,61 +51,108 @@
         $s = {{ coolify_server_php }};
         echo 'config:' . base64_encode(App\Actions\Proxy\GetProxyConfiguration::run($s));
   register: coolify_proxy_read
-  check_mode: false
   changed_when: false
   failed_when: >-
     coolify_proxy_read.rc != 0
     or coolify_proxy_read.stdout_lines | select('match', '^config:.') | list | length != 1
   no_log: true
+  when: not ansible_check_mode
+
+- name: Look for the proxy's compose file (check mode)
+  ansible.builtin.stat:
+    path: "{{ coolify_proxy_compose_file }}"
+    get_checksum: false
+  delegate_to: "{{ coolify_proxy_host }}"
+  register: coolify_proxy_file
+  when: ansible_check_mode
+
+- name: Read the proxy's compose file (check mode)
+  ansible.builtin.slurp:
+    src: "{{ coolify_proxy_compose_file }}"
+  delegate_to: "{{ coolify_proxy_host }}"
+  register: coolify_proxy_file_content
+  when: ansible_check_mode and coolify_proxy_file.stat.exists and coolify_proxy_file.stat.size > 0
+  no_log: true
+
+- name: Report the proxy configuration Coolify would write (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      {{ coolify_proxy_compose_file }} is missing or empty on
+      {{ coolify_proxy_host }}: the run has Coolify write its default proxy
+      configuration there and then gives Traefik DNS-01. Nothing to compare
+      it with in check mode.
+  changed_when: true
+  when: ansible_check_mode and coolify_proxy_file_content is skipped
 
 - name: Work out the proxy configuration with DNS-01
   ansible.builtin.set_fact:
     coolify_proxy_current: >-
-      {{ coolify_proxy_read.stdout_lines | select('match', '^config:') | first
-         | regex_replace('^config:', '') | b64decode | from_yaml }}
+      {{ (coolify_proxy_file_content.content
+          if ansible_check_mode else
+          coolify_proxy_read.stdout_lines | select('match', '^config:') | first
+          | regex_replace('^config:', ''))
+         | b64decode | from_yaml }}
   no_log: true
+  when: not (ansible_check_mode and coolify_proxy_file_content is skipped)
 
-- name: Check that the proxy configuration is Traefik's
-  ansible.builtin.assert:
-    that:
-      - coolify_proxy_current is mapping
-      - coolify_proxy_current.services.traefik.command | default('') is sequence
-      - coolify_proxy_current.services.traefik.command | default('') is not string
-    fail_msg: >-
-      The proxy configuration of {{ coolify_proxy_host }} in Coolify has no
-      services.traefik.command list: is its proxy Traefik? Reset it in
-      Coolify (Servers > Proxy > Reset configuration) and rerun.
-    quiet: true
+- name: Give Traefik DNS-01, from the configuration read
+  when: not (ansible_check_mode and coolify_proxy_file_content is skipped)
+  block:
+    - name: Check that the proxy configuration is Traefik's
+      ansible.builtin.assert:
+        that:
+          - coolify_proxy_current is mapping
+          - coolify_proxy_current.services.traefik.command | default('') is sequence
+          - coolify_proxy_current.services.traefik.command | default('') is not string
+        fail_msg: >-
+          The proxy configuration of {{ coolify_proxy_host }} in Coolify has no
+          services.traefik.command list: is its proxy Traefik? Reset it in
+          Coolify (Servers > Proxy > Reset configuration) and rerun.
+        quiet: true
 
-- name: Remember the proxy configuration with DNS-01
-  ansible.builtin.set_fact:
-    coolify_proxy_wanted: "{{ coolify_proxy_dns01_config }}"
-  no_log: true
+    - name: Remember the proxy configuration with DNS-01
+      ansible.builtin.set_fact:
+        coolify_proxy_wanted: "{{ coolify_proxy_dns01_config }}"
+      no_log: true
 
-- name: Give Traefik its certificates through DNS-01
-  ansible.builtin.command:
-    argv:
-      - docker
-      - exec
-      - coolify
-      - php
-      - /var/www/html/artisan
-      - tinker
-      - --execute
-      - >-
-        $s = {{ coolify_server_php }};
-        App\Actions\Proxy\SaveProxyConfiguration::run($s, base64_decode('{{ coolify_proxy_wanted | to_nice_yaml(indent=2, width=4096) | b64encode }}'));
-        App\Actions\Proxy\StartProxy::run($s, async: false, force: true);
-        echo 'changed';
-  register: coolify_proxy_dns01
-  changed_when: true
-  failed_when: coolify_proxy_dns01.rc != 0 or 'changed' not in coolify_proxy_dns01.stdout_lines
-  when: coolify_proxy_wanted != coolify_proxy_current
-  no_log: true
+    - name: Give Traefik its certificates through DNS-01
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - coolify
+          - php
+          - /var/www/html/artisan
+          - tinker
+          - --execute
+          - >-
+            $s = {{ coolify_server_php }};
+            App\Actions\Proxy\SaveProxyConfiguration::run($s, base64_decode('{{ coolify_proxy_wanted | to_nice_yaml(indent=2, width=4096) | b64encode }}'));
+            App\Actions\Proxy\StartProxy::run($s, async: false, force: true);
+            echo 'changed';
+      register: coolify_proxy_dns01
+      changed_when: true
+      failed_when: coolify_proxy_dns01.rc != 0 or 'changed' not in coolify_proxy_dns01.stdout_lines
+      when: coolify_proxy_wanted != coolify_proxy_current
+      no_log: true
 
-- name: Show Traefik's certificate settings
-  ansible.builtin.debug:
-    msg: >-
-      {{ coolify_proxy_wanted.services.traefik.command
-         | select('match', '^--(certificatesresolvers|entrypoints\.https\.http\.tls)\.') | list
-         + coolify_proxy_wanted.services.traefik.environment | select('match', '^CF_') | list }}
+    # The task above is a command, skipped in check mode: say what it would do.
+    - name: Report the DNS-01 settings the run would save (check mode)
+      ansible.builtin.debug:
+        msg: >-
+          The run saves the proxy configuration of {{ coolify_proxy_host }}
+          and restarts its proxy. Command flags it adds:
+          {{ coolify_proxy_wanted.services.traefik.command
+             | reject('in', coolify_proxy_current.services.traefik.command) | list }};
+          flags it removes:
+          {{ coolify_proxy_current.services.traefik.command
+             | reject('in', coolify_proxy_wanted.services.traefik.command) | list }}.
+      changed_when: true
+      when: ansible_check_mode and coolify_proxy_wanted != coolify_proxy_current
+
+    - name: Show Traefik's certificate settings
+      ansible.builtin.debug:
+        msg: >-
+          {{ coolify_proxy_wanted.services.traefik.command
+             | select('match', '^--(certificatesresolvers|entrypoints\.https\.http\.tls)\.') | list
+             + coolify_proxy_wanted.services.traefik.environment | select('match', '^CF_') | list }}

@@ -27,6 +27,11 @@ coolify_proxy_dns_token_file: "{{ coolify_dns_token_file }}"
 coolify_proxy_host: "{{ inventory_hostname }}"
 coolify_proxy_dns_secret: /run/secrets/cloudflare-dns-token
 
+# The proxy configuration Coolify keeps on coolify_proxy_host (its proxy path,
+# /data/coolify/proxy, mounted at /traefik). A check run reads it directly
+# instead of through Coolify, which may write it.
+coolify_proxy_compose_file: /data/coolify/proxy/docker-compose.yml
+
 # Zones whose certificate for <zone> and *.<zone> Traefik gets up front, on
 # its https entrypoint, so every PR preview there uses it and none asks for
 # its own. Here: the tailnet-only zones whose previews stay on this host
