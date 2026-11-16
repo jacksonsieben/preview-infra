@@ -18,6 +18,16 @@
       {{ (coolify_apps + preview_apps) | map(attribute='preview_env', default={}) | select | list | length > 0
          or (coolify_apps + preview_apps) | map(attribute='production_env', default={}) | select | list | length > 0 }}
 
+# Opening the session mints a token (and may turn the API on), so check mode
+# leaves it, and everything that needs it, out.
+- name: Report the applications left out of check mode
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: Coolify's applications and their environment variables are
+      not compared, because reading them through the API takes a token that
+      only a real run creates.
+  when: ansible_check_mode
+
 - name: Open a Coolify API session
   ansible.builtin.command:
     argv:
@@ -41,13 +51,16 @@
   register: coolify_api_session_raw
   changed_when: false
   no_log: true
+  when: not ansible_check_mode
 
 - name: Remember the API session
   ansible.builtin.set_fact:
     coolify_api_session: "{{ coolify_api_session_raw.stdout_lines | select('match', '^\\{') | last | from_json }}"
   no_log: true
+  when: not ansible_check_mode
 
 - name: Configure the applications
+  when: not ansible_check_mode
   block:
     # Only coolify_apps are created here; preview_apps exist already.
     - name: Check the server and the GitHub App

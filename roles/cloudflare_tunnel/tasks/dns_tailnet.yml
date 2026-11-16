@@ -11,6 +11,7 @@
     headers:
       Authorization: "Bearer {{ cloudflare_api_token }}"
   register: dns_tailnet_lookup
+  check_mode: false
 
 - name: "Check that {{ dns_name }} has one record at most"
   ansible.builtin.assert:

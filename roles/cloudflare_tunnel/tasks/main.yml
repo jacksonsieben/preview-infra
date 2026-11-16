@@ -56,6 +56,7 @@
     headers: &cloudflare_headers
       Authorization: "Bearer {{ cloudflare_api_token }}"
   register: cloudflare_zone
+  check_mode: false
   failed_when: cloudflare_zone.json.result | length != 1
 
 - name: Remember the zone and account ids
@@ -73,6 +74,7 @@
   loop_control:
     label: "{{ item.zone }}"
   register: cloudflare_extra_zone_lookup
+  check_mode: false
   failed_when: >-
     cloudflare_extra_zone_lookup.json.result | length != 1
     or cloudflare_extra_zone_lookup.json.result[0].account.id != cloudflare_account_id
@@ -91,6 +93,7 @@
     url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel?name={{ cloudflare_tunnel_name }}&is_deleted=false"
     headers: *cloudflare_headers
   register: cloudflare_tunnel_lookup
+  check_mode: false
 
 - name: Create the tunnel
   ansible.builtin.uri:
@@ -110,13 +113,16 @@
     cloudflare_tunnel_id: >-
       {{ (cloudflare_tunnel_created.json.result
           if cloudflare_tunnel_created is not skipped
-          else cloudflare_tunnel_lookup.json.result[0]).id }}
+          else cloudflare_tunnel_lookup.json.result | first | default({'id': ''})).id }}
 
 - name: Read the current tunnel routes
   ansible.builtin.uri:
     url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ cloudflare_tunnel_id }}/configurations"
     headers: *cloudflare_headers
   register: cloudflare_tunnel_config
+  check_mode: false
+  # In check mode, a tunnel the task above would create has no id yet.
+  when: cloudflare_tunnel_id | length > 0
 
 # Cloudflare adds defaults to stored rules, so compare only the fields set here.
 - name: Compare the tunnel routes
@@ -149,6 +155,7 @@
     url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/access/organizations"
     headers: *cloudflare_headers
   register: cloudflare_access_org
+  check_mode: false
   failed_when: false
   when: cloudflare_access_zones | length > 0
 
@@ -208,6 +215,7 @@
 - name: Read this host's tailnet address
   ansible.builtin.command: tailscale ip -4
   register: cloudflare_tailnet_ip
+  check_mode: false
   changed_when: false
   when: cloudflare_tailnet_names | length > 0
 
@@ -228,7 +236,10 @@
     url: "{{ cloudflare_api }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ cloudflare_tunnel_id }}/token"
     headers: *cloudflare_headers
   register: cloudflare_tunnel_token
+  check_mode: false
   no_log: true
+  # In check mode, a tunnel to create has no id, nor a token, yet.
+  when: cloudflare_tunnel_id | length > 0
 
 - name: Create the cloudflared directory
   ansible.builtin.file:
@@ -242,6 +253,7 @@
     dest: "{{ cloudflared_dir }}/.env"
     mode: "0600"
   no_log: true
+  when: cloudflare_tunnel_token is not skipped
   notify: Restart cloudflared
 
 - name: Write the cloudflared compose file

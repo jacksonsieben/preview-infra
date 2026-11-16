@@ -8,6 +8,7 @@
   ansible.builtin.command:
     cmd: docker network inspect coolify --format {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %}
   register: coolify_subnet
+  check_mode: false
   changed_when: false
 
 - name: Find Coolify's public keys
@@ -48,6 +49,7 @@
   ansible.builtin.shell:
     cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
   register: coolify_sshd_path
+  check_mode: false
   changed_when: false
 
 - name: Allow root logins with a key from the Coolify network
@@ -69,6 +71,7 @@
   ansible.builtin.shell:
     cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v ufw
   register: coolify_ufw
+  check_mode: false
   changed_when: false
   failed_when: false
 

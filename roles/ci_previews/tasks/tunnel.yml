@@ -37,6 +37,7 @@
         headers: "{{ ci_previews_cf_headers }}"
       loop: "{{ ci_previews_zone_names }}"
       register: ci_previews_zone_lookup
+      check_mode: false
       failed_when: ci_previews_zone_lookup.json.result | default([]) | length != 1
 
     # One tunnel per account: every zone must be on the same one.
@@ -62,6 +63,7 @@
             url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel?name={{ ci_previews_tunnel_name | urlencode }}&is_deleted=false"
             headers: "{{ ci_previews_cf_headers }}"
           register: ci_previews_tunnel_lookup
+          check_mode: false
 
         - name: Create ci-1's tunnel
           ansible.builtin.uri:
@@ -81,13 +83,16 @@
             ci_previews_tunnel_id: >-
               {{ (ci_previews_tunnel_created.json.result
                   if ci_previews_tunnel_created is not skipped
-                  else ci_previews_tunnel_lookup.json.result[0]).id }}
+                  else ci_previews_tunnel_lookup.json.result | first | default({'id': ''})).id }}
 
         - name: Read ci-1's tunnel routes
           ansible.builtin.uri:
             url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel/{{ ci_previews_tunnel_id }}/configurations"
             headers: "{{ ci_previews_cf_headers }}"
           register: ci_previews_tunnel_config
+          check_mode: false
+          # In check mode, a tunnel the task above would create has no id yet.
+          when: ci_previews_tunnel_id | length > 0
 
         # Cloudflare adds defaults to stored rules, so compare only the fields set here.
         - name: Set ci-1's tunnel routes
@@ -120,6 +125,7 @@
         url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/access/organizations"
         headers: "{{ ci_previews_cf_headers }}"
       register: ci_previews_access_org
+      check_mode: false
       when: ci_previews_protected_zones | length > 0
 
     - name: Look up the Access applications of preview_zones
@@ -132,6 +138,7 @@
       loop_control:
         label: "{{ item.zone }}"
       register: ci_previews_access_apps
+      check_mode: false
       when: item.zone | lower in ci_previews_protected_zones
 
     - name: Remember the Access settings
@@ -158,6 +165,9 @@
           or the team domain. The preview host's play creates them: run the
           whole playbook (site.yml), not --limit ci alone.
         quiet: true
+      # In check mode the preview host's play creates nothing: reported, not
+      # fatal.
+      ignore_errors: "{{ ansible_check_mode }}"
 
     # --- DNS -----------------------------------------------------------------
 
@@ -169,6 +179,7 @@
       loop_control:
         label: "{{ item.name }}"
       register: ci_previews_kept_lookup
+      check_mode: false
 
     - name: Check that each name the preview host keeps has its own record
       ansible.builtin.assert:
@@ -182,6 +193,9 @@
       loop: "{{ ci_previews_kept_lookup.results }}"
       loop_control:
         label: "{{ item.item.name }}"
+      # In check mode the preview host's play creates nothing: reported, not
+      # fatal.
+      ignore_errors: "{{ ansible_check_mode }}"
 
     - name: Look up the wildcard records
       ansible.builtin.uri:
@@ -189,6 +203,7 @@
         headers: "{{ ci_previews_cf_headers }}"
       loop: "{{ ci_previews_zone_names }}"
       register: ci_previews_wildcard_lookup
+      check_mode: false
 
     - name: Point the wildcards at ci-1's tunnel
       ansible.builtin.uri:
@@ -264,8 +279,12 @@
         url: "{{ ci_previews_cloudflare_api }}/accounts/{{ ci_previews_account_id }}/cfd_tunnel/{{ ci_previews_tunnel_id }}/token"
         headers: "{{ ci_previews_cf_headers }}"
       register: ci_previews_tunnel_token
+      check_mode: false
       no_log: true
-      when: ci_previews_tunnel_zones | length > 0
+      when:
+        - ci_previews_tunnel_zones | length > 0
+        # In check mode, a tunnel to create has no id, nor a token, yet.
+        - ci_previews_tunnel_id | default('') | length > 0
 
 # --- cloudflared on this host ------------------------------------------------
 
@@ -288,6 +307,7 @@
         dest: "{{ ci_previews_cloudflared_dir }}/.env"
         mode: "0600"
       no_log: true
+      when: ci_previews_tunnel_token is not skipped
       notify: Restart ci-1's cloudflared
 
     - name: Write the cloudflared compose file

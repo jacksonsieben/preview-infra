@@ -8,6 +8,7 @@
   ansible.builtin.shell:
     cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
   register: ci_host_sshd
+  check_mode: false
   changed_when: false
 
 # sshd keeps the first value it reads and includes sshd_config.d/*.conf at the
@@ -22,4 +23,5 @@
 
 - name: Check the whole sshd configuration
   ansible.builtin.command: "{{ ci_host_sshd.stdout }} -t"
+  check_mode: false
   changed_when: false

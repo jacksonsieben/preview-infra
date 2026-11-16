@@ -45,6 +45,7 @@
         $s = {{ coolify_server_php }};
         echo 'config:' . base64_encode(App\Actions\Proxy\GetProxyConfiguration::run($s));
   register: coolify_proxy_read
+  check_mode: false
   changed_when: false
   failed_when: >-
     coolify_proxy_read.rc != 0

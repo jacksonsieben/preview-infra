@@ -9,6 +9,20 @@
     path: /data/coolify/source/.env
   register: coolify_env
 
+# Every later task of this play talks to Coolify, which only a real run
+# installs.
+- name: Report a check of a host without Coolify
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: Coolify is not installed on {{ inventory_hostname }} yet, and
+      the rest of this play needs it. Run the playbook once for real; check
+      mode previews the runs after that.
+  when: ansible_check_mode and not coolify_env.stat.exists
+
+- name: Stop the check of a host without Coolify
+  ansible.builtin.meta: end_host
+  when: ansible_check_mode and not coolify_env.stat.exists
+
 - name: Install Coolify
   when: not coolify_env.stat.exists
   block:
@@ -121,6 +135,7 @@
     url: http://127.0.0.1:8000/api/health
     status_code: 200
   register: coolify_health
+  check_mode: false
   until: coolify_health.status == 200
   retries: 30
   delay: 5
