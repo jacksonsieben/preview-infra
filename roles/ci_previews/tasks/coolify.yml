@@ -15,6 +15,7 @@
 #
 # ci-1 is added to Coolify by hand. Until it is, this only says so.
 
+# read-only: one exists() query on Coolify's database.
 - name: Look up ci-1 in Coolify
   ansible.builtin.command:
     argv:

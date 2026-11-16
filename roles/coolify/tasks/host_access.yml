@@ -4,6 +4,7 @@
 # PermitRootLogin no and ufw) get a narrow exception: root with a key, only
 # from that network. Every other client keeps the host's own rules.
 
+# read-only: docker network inspect.
 - name: Read the Coolify network subnet
   ansible.builtin.command:
     cmd: docker network inspect coolify --format {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %}
@@ -45,6 +46,7 @@
 # setting: append it to the main sshd_config, never to a drop-in included at
 # the top. It overrides PermitRootLogin, and an AllowUsers list that leaves
 # root out (e.g. AllowUsers <you> in a drop-in), only for the Coolify network.
+# read-only: command -v prints a path.
 - name: Find sshd
   ansible.builtin.shell:
     cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
@@ -67,6 +69,7 @@
 
 # ufw is in /usr/sbin on Debian and Ubuntu, /usr/bin on Arch; not on PATH for
 # every user, so look in both.
+# read-only: command -v prints a path.
 - name: Check for ufw
   ansible.builtin.shell:
     cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v ufw

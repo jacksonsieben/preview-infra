@@ -5,6 +5,7 @@
 # must already be logged in to Tailscale; this role does not install or
 # authenticate it.
 
+# read-only: tailscale status prints the state.
 - name: Read the Tailscale status
   ansible.builtin.command: tailscale status --json
   register: tailscale_status_raw
@@ -26,6 +27,7 @@
       Step 3).
     quiet: true
 
+# read-only: tailscale serve status.
 - name: Read the current Tailscale Serve settings
   ansible.builtin.command: tailscale serve status --json
   register: tailscale_serve_raw

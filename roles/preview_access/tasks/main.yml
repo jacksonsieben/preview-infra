@@ -128,6 +128,7 @@
     # On the remote host, Coolify starts the proxy once the host is added in
     # its dashboard (README, Previews on ci-1); until then there is nothing
     # to check.
+    # read-only: docker ps.
     - name: Check whether Coolify's proxy runs here
       ansible.builtin.command: docker ps --quiet --filter name=^coolify-proxy$ --filter status=running
       register: preview_access_proxy

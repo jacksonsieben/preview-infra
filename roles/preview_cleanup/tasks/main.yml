@@ -23,6 +23,9 @@
     name: coolify-prune-images.timer
     enabled: true
     state: started
+  # A check run on a new host has not written the unit yet: reported as
+  # ignored. A real run fails as before.
+  ignore_errors: "{{ ansible_check_mode }}"
 
 - name: Set Coolify's own Docker cleanup for this host
   ansible.builtin.include_tasks: coolify_settings.yml

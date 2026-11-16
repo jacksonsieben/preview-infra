@@ -82,6 +82,7 @@
         create: true
         mode: "0600"
 
+    # read-only: command -v prints a path.
     - name: Find sshd
       ansible.builtin.shell:
         cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
@@ -110,16 +111,20 @@
     # Coolify creates `coolify` when it validates the server, and its
     # destinations with `docker network create` only if they are missing, so
     # the bridge names (pv-<name>, which the isolation rules match) hold.
+    # read-only: docker network ls.
     - name: Read the Docker networks
       ansible.builtin.command: docker network ls --format {% raw %}'{{ .Name }}'{% endraw %}
       register: ci_previews_existing_networks
       check_mode: false
       changed_when: false
+      # A check run on a new ci-1 has not installed Docker (roles/ci_host):
+      # reported as ignored, and every network counts as missing.
+      ignore_errors: "{{ ansible_check_mode }}"
 
     - name: Create Coolify's network
       ansible.builtin.command: docker network create --attachable coolify
       changed_when: true
-      when: "'coolify' not in ci_previews_existing_networks.stdout_lines"
+      when: "'coolify' not in ci_previews_existing_networks.stdout_lines | default([])"
 
     - name: Create the preview networks
       ansible.builtin.command:
@@ -133,8 +138,9 @@
           - previews-{{ item }}
       loop: "{{ ci_previews_networks }}"
       changed_when: true
-      when: ('previews-' ~ item) not in ci_previews_existing_networks.stdout_lines
+      when: ('previews-' ~ item) not in ci_previews_existing_networks.stdout_lines | default([])
 
+    # read-only: docker network inspect.
     - name: Read the preview networks' bridges
       ansible.builtin.command:
         argv:
@@ -151,7 +157,7 @@
       # In check mode, a network the task above would create is not there.
       failed_when: >-
         ci_previews_bridges.rc != 0
-        and not (ansible_check_mode and ('previews-' ~ item) not in ci_previews_existing_networks.stdout_lines)
+        and not (ansible_check_mode and ('previews-' ~ item) not in ci_previews_existing_networks.stdout_lines | default([]))
 
     # One made by hand (by Coolify, for one) has a br-<id> bridge that the
     # isolation rules do not match.
@@ -197,6 +203,7 @@
     # Traefik keeps listening on loopback only: nothing else reaches it, and
     # the tailnet's ACL decides who reaches this port (README, Tailscale
     # ACL).
+    # read-only: tailscale serve status.
     - name: Read ci-1's Tailscale Serve settings
       ansible.builtin.command: tailscale serve status --json
       register: ci_previews_serve
@@ -251,6 +258,9 @@
         name: preview-limit.timer
         enabled: true
         state: started
+      # A check run on a new host has not written the unit yet: reported as
+      # ignored. A real run fails as before.
+      ignore_errors: "{{ ansible_check_mode }}"
 
     # The image cleanup of the preview host. Coolify's own cleanup of this
     # server is set from the preview host (coolify.yml).

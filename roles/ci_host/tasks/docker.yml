@@ -22,3 +22,5 @@
     name: docker
     enabled: true
     state: started
+  # A check run on a new host has not installed Docker: reported as ignored.
+  ignore_errors: "{{ ansible_check_mode }}"

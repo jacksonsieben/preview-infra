@@ -91,12 +91,16 @@
 
 # The runners' containers go into a systemd slice that holds the limits, which
 # Docker supports only with its systemd cgroup driver.
+# read-only: docker info.
 - name: Read Docker's cgroup driver
   ansible.builtin.command:
     cmd: docker info --format {% raw %}'{{ .CgroupDriver }}'{% endraw %}
   register: github_runner_cgroup_driver
   check_mode: false
   changed_when: false
+  # A check run on a new ci-1 has not installed Docker (roles/ci_host):
+  # reported as ignored, and the driver is not checked.
+  ignore_errors: "{{ ansible_check_mode }}"
 
 - name: Check Docker's cgroup driver
   ansible.builtin.assert:
@@ -107,6 +111,7 @@
       the runner limits need systemd (exec-opts native.cgroupdriver=systemd in
       /etc/docker/daemon.json).
     quiet: true
+  when: github_runner_cgroup_driver is succeeded
 
 - name: Create the runner directories
   ansible.builtin.file:
@@ -189,6 +194,9 @@
     name: github-runner-update.timer
     enabled: true
     state: started
+  # A check run on a new host has not written the unit yet: reported as
+  # ignored. A real run fails as before.
+  ignore_errors: "{{ ansible_check_mode }}"
 
 - name: Start the runners
   ansible.builtin.systemd_service:
@@ -196,3 +204,6 @@
     enabled: true
     state: started
   loop: "{{ github_runner_wanted.keys() | list }}"
+  # A check run on a new host has not written the unit yet: reported as
+  # ignored. A real run fails as before.
+  ignore_errors: "{{ ansible_check_mode }}"

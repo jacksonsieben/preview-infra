@@ -171,8 +171,11 @@ or *skipped* for an API call or a command that only a real run makes). Left
 out: Coolify's applications and their environment variables (reading them
 takes an API token that only a real run creates), and a host without Coolify
 yet, where the check stops early. A check that depends on what the run would
-create first (a new tunnel, Access application or DNS record) is reported as
-*ignored* instead of failing.
+create first (a new tunnel, Access application or DNS record, a systemd unit,
+or Docker on a new `ci-1`) is reported as *ignored* instead of failing, so the
+check of a new `ci-1` runs to the end. Traefik's DNS-01 settings are worked
+out from the proxy's compose file, read directly (Coolify's own read may
+write it), and reported; a proxy without one yet is reported too.
 
 Afterwards:
 
@@ -466,9 +469,11 @@ for real: the checks are `ansible-playbook site.yml --syntax-check` and
 DNS names offline and fails if production's would change, and
 `python3 tests/coolify_env.py`, which runs the `coolify_apps` role against a
 fake Coolify API and checks the environment variables.
-`python3 tests/check_mode.py` checks that every task that only reads
-(`uri` with no `method`, or a `command`/`shell` with `changed_when: false`)
-also runs in check mode (`check_mode: false`), so `--check --diff` works.
+`python3 tests/check_mode.py` checks that every `uri` task that only reads
+(no `method`, or `GET`) also runs in check mode (`check_mode: false`), so
+`--check --diff` works, and that a `command`/`shell` task runs there only with
+a `# read-only: <why>` comment right above it: `changed_when: false` says how
+a task is reported, not that it changes nothing.
 `ansible-playbook tests/coolify_build_limit.yml` checks the build limit task
 against a stand-in for `docker`.
 `ansible-playbook tests/github_runner_settings.yml` checks the runner instance
@@ -479,7 +484,9 @@ Traefik file of the previews on `ci-1`, `ansible-playbook
 tests/ci_previews_coolify.yml` that their Coolify settings go to `ci-1`'s
 server, and `python3 tests/preview_limit.py` which previews `preview-limit`
 stops. `ansible-playbook tests/proxy_dns01.yml` checks Traefik's DNS-01
-settings against a stand-in for `docker`. The *Checks* workflow
+settings against a stand-in for `docker`, and `ansible-playbook
+tests/proxy_dns01_check.yml --check` that check mode reads the compose file
+and calls nothing. The *Checks* workflow
 (`.github/workflows/checks.yml`) runs them all on every pull request, on
 GitHub's runners.
 

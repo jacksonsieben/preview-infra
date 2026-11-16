@@ -39,3 +39,6 @@
     name: memory-floor
     enabled: true
     state: started
+  # A check run on a new host has not written the unit yet: reported as
+  # ignored. A real run fails as before.
+  ignore_errors: "{{ ansible_check_mode }}"

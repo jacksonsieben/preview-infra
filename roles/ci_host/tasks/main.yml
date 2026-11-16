@@ -8,18 +8,21 @@
 # this very connection came through it: applied over any other path, the next
 # connection would be refused.
 
+# read-only: tailscale status prints the state.
 - name: Read the state of Tailscale
   ansible.builtin.command: tailscale status --json --peers=false
   register: ci_host_tailscale
   check_mode: false
   changed_when: false
 
+# read-only: tailscale ip prints the addresses.
 - name: Read the host's tailnet addresses
   ansible.builtin.command: tailscale ip
   register: ci_host_tailnet_ips
   check_mode: false
   changed_when: false
 
+# read-only: prints $SSH_CONNECTION, parsed.
 - name: Read the addresses of this SSH connection
   ansible.builtin.command:
     argv:
