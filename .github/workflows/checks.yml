@@ -31,6 +31,8 @@ jobs:
           ansible-galaxy collection list community.general
       - name: Syntax check
         run: ansible-playbook site.yml --syntax-check
+      - name: Reads run in check mode
+        run: python3 tests/check_mode.py
       - name: Tunnel routes
         run: ansible-playbook tests/tunnel_routes.yml
       - name: Coolify environment variables
