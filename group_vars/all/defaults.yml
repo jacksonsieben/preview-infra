@@ -235,6 +235,18 @@ github_runner_instances: 1
 # Workflows pick the runner with `runs-on: [self-hosted, preview-host]`.
 github_runner_labels: [self-hosted, linux, x64, preview-host]
 
+# Several runners per repository, each with labels of its own (README, Several
+# runners per repository). Empty: github_runner_repos and
+# github_runner_instances, all with github_runner_labels. Each entry:
+#   repo        owner/name, private only (scope repo)
+#   name        heavy, light...: lowercase letters, digits and _
+#   labels      capability labels added to github_runner_labels, e.g. [ci-light]
+#   instances   runners of this entry (default 1)
+#   cpu_quota   optional limit of this entry's jobs, e.g. 50% (half a core)
+#   memory_max  optional limit, e.g. 2G
+# All of them stay within github_runner_cpu_quota and github_runner_memory_max.
+github_runners: []
+
 # Limits shared by all runners and their jobs together, so the previews keep
 # running. CPU in percent of one core (200% = two cores). Under contention the
 # runners also get half the CPU and disk weight of everything else.
@@ -300,6 +312,10 @@ ci_host_runner_instances: 1
 # ci-1 is ARM (aarch64): jobs, and the images they build, are linux/arm64.
 # Workflows pick it with `runs-on: [self-hosted, ARM64, ci-1]`.
 ci_host_runner_labels: [self-hosted, linux, ARM64, ci-1]
+
+# Several runners per repository on ci-1, as github_runners (README, Several
+# runners per repository). Each one carries ci_host_runner_labels as well.
+ci_host_runners: []
 
 # ci-1 has 2 cores and 12 GB, and nothing else heavy runs on it yet: the
 # runners get both cores and 8 GB, and leave 4 GB to the system and Docker.

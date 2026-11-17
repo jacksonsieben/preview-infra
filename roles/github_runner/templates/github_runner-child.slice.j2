@@ -1,0 +1,16 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# The runners {{ item.base }}-<n> (github_runners), their Docker daemons and
+# the containers their jobs start. Inside {{ github_runner_slice }}, so its
+# limits apply to them too.
+[Unit]
+Description=GitHub Actions runners {{ item.base }} and their jobs
+
+[Slice]
+{% if item.cpu_quota %}
+CPUQuota={{ item.cpu_quota }}
+{% endif %}
+{% if item.memory_max %}
+MemoryMax={{ item.memory_max }}
+{% endif %}
+MemorySwapMax=0

@@ -1,6 +1,7 @@
 ---
-# The github_runner settings: instance names, the check that they do not
-# collide, and the tool cache default for each scope. Offline: no API call,
+# The github_runner settings: instance names, labels and slices, with and
+# without github_runners, the check that they do not collide, and the tool
+# cache default for each scope. Offline: no API call,
 # nothing changed, and group_vars/all/local.yml is not read.
 #
 #   ansible-playbook tests/github_runner_settings.yml
@@ -54,6 +55,95 @@
         - [you/app, you/app]
         - [You/App, you/app]
 
+    - name: Check that a config without github_runners keeps its instances and slice
+      ansible.builtin.assert:
+        that:
+          - "github_runner_wanted == {'you-app-1': 'repos/you/app'}"
+          - "github_runner_instance_settings['you-app-1'] == expected"
+          - github_runner_child_slices == []
+          - github_runner_lookup_repos == ['you/app']
+        fail_msg: "Instances: {{ github_runner_instance_settings }}"
+      vars:
+        github_runner_repos: [you/app]
+        expected:
+          target: repos/you/app
+          labels: [self-hosted, linux, x64, preview-host]
+          slice: github_runner.slice
+
+    - name: Check several runners per repository
+      ansible.builtin.assert:
+        that:
+          - github_runner_instance_settings == expected
+          - github_runner_names_unique | bool
+          - github_runner_lookup_repos == ['owner/example']
+          - github_runner_child_slices | map(attribute='slice') | list == expected_slices
+          - github_runner_child_slices | map(attribute='cpu_quota') | list == ['', '50%']
+          - github_runner_child_slices | map(attribute='memory_max') | list == ['', '2G']
+        fail_msg: "Instances: {{ github_runner_instance_settings }}"
+      vars:
+        github_runner_labels: [self-hosted, linux, ARM64, ci-1]
+        github_runners:
+          - {repo: owner/example, name: heavy, labels: [ci-heavy]}
+          - {repo: owner/example, name: light, labels: [ci-light], instances: 2,
+             cpu_quota: 50%, memory_max: 2G}
+        expected_slices:
+          - github_runner-owner_example_heavy.slice
+          - github_runner-owner_example_light.slice
+        expected:
+          owner-example-heavy-1:
+            target: repos/owner/example
+            labels: [self-hosted, linux, ARM64, ci-1, ci-heavy]
+            slice: github_runner-owner_example_heavy.slice
+          owner-example-light-1:
+            target: repos/owner/example
+            labels: [self-hosted, linux, ARM64, ci-1, ci-light]
+            slice: github_runner-owner_example_light.slice
+          owner-example-light-2:
+            target: repos/owner/example
+            labels: [self-hosted, linux, ARM64, ci-1, ci-light]
+            slice: github_runner-owner_example_light.slice
+
+    - name: Check that colliding runners of the list are refused
+      ansible.builtin.assert:
+        that:
+          - not github_runner_names_unique | bool
+        fail_msg: "{{ item }} was accepted: {{ github_runner_instance_settings }}"
+      vars:
+        github_runners: "{{ item }}"
+      loop:
+        - [{repo: you/app, name: light}, {repo: you/app, name: light}]
+        - [{repo: you/app, name: light}, {repo: You/App, name: light}]
+        - [{repo: a-b/c, name: x}, {repo: a/b-c, name: x}]
+        - [{repo: a.b/c, name: x}, {repo: a_b/c, name: x}]
+
+    - name: Render the slice of a light runner
+      ansible.builtin.assert:
+        that:
+          - "'CPUQuota=50%' in rendered"
+          - "'MemoryMax=2G' in rendered"
+          - "'MemorySwapMax=0' in rendered"
+          - "'owner-example-light' in rendered"
+        fail_msg: "{{ rendered }}"
+      vars:
+        rendered: >-
+          {{ lookup('ansible.builtin.template',
+                    '../roles/github_runner/templates/github_runner-child.slice.j2',
+                    template_vars={'item': {'base': 'owner-example-light', 'cpu_quota': '50%',
+                                            'memory_max': '2G'}}) }}
+
+    - name: Render the slice of a runner without limits of its own
+      ansible.builtin.assert:
+        that:
+          - "'CPUQuota' not in rendered"
+          - "'MemoryMax=' not in rendered"
+        fail_msg: "{{ rendered }}"
+      vars:
+        rendered: >-
+          {{ lookup('ansible.builtin.template',
+                    '../roles/github_runner/templates/github_runner-child.slice.j2',
+                    template_vars={'item': {'base': 'owner-example-heavy', 'cpu_quota': '',
+                                            'memory_max': ''}}) }}
+
     - name: Check that the tool cache is emptied for every job with org only
       ansible.builtin.assert:
         that:
@@ -71,7 +161,8 @@
           - not github_runner_enabled
           - github_runner_wanted == {}
 
-    # site.yml hands ci-1's settings to the role as github_runner_*; one left
+    # site.yml hands ci-1's settings to the role as github_runner_* (and
+    # ci_host_runners as github_runners); one left
     # out would silently take the preview host's value on ci-1.
     - name: Check that the ci play maps every ci_host_runner setting
       ansible.builtin.assert:
@@ -87,9 +178,9 @@
               | first).vars }}
         settings: >-
           {{ (lookup('ansible.builtin.file', '../group_vars/all/defaults.yml') | from_yaml).keys()
-             | select('match', '^ci_host_runner_') | list }}
+             | select('match', '^ci_host_runner(_|s$)') | list }}
         expected: >-
-          {{ dict(settings | map('regex_replace', '^ci_host_runner_', 'github_runner_')
+          {{ dict(settings | map('regex_replace', '^ci_host_runner', 'github_runner')
                   | zip(settings | map('regex_replace', '^(.*)$', '{{ \1 }}'))) }}
 
     - name: Check ci-1's runner defaults
@@ -99,4 +190,5 @@
           - "'ARM64' in ci_host_runner_labels"
           - "'x64' not in ci_host_runner_labels"
           - "'ci-1' in ci_host_runner_labels"
+          - ci_host_runners == []
         fail_msg: "Labels: {{ ci_host_runner_labels }}"

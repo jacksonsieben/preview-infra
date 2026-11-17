@@ -28,23 +28,72 @@ github_runner_data_dir: /var/lib/github-runner
 # systemd slice that holds every runner and job, with the shared limits.
 github_runner_slice: github_runner.slice
 
-# One entry per systemd instance (github-runner@<name>.service), built from
-# github_runner_scope, github_runner_repos/org and github_runner_instances.
+# The runner groups: github_runners as given or, without it, one group per
+# target of github_runner_scope with github_runner_repos/org,
+# github_runner_instances and github_runner_labels, as before github_runners.
+# A group of github_runners gets its own systemd slice inside
+# github_runner_slice, with its own limits: github_runner-<owner>_<repo>_<name>.slice.
 github_runner_targets: >-
   {{ ['orgs/' ~ github_runner_org] if github_runner_scope == 'org'
      else github_runner_repos | map('regex_replace', '^', 'repos/') | list }}
-github_runner_wanted: >-
-  {%- set ns = namespace(items={}) -%}
+github_runner_groups: >-
+  {%- set ns = namespace(items=[]) -%}
+  {%- if github_runners | length > 0 -%}
+  {%- for r in github_runners -%}
+  {%- set base = (r.repo | default('') | replace('/', '-')) ~ '-' ~ (r.name | default('')) -%}
+  {%- set ns.items = ns.items + [{
+        'base': base,
+        'target': 'repos/' ~ (r.repo | default('')),
+        'instances': r.instances | default(1) | int,
+        'labels': (github_runner_labels + (r.labels | default([]) | list)) | unique | list,
+        'slice': 'github_runner-' ~ (base | lower | regex_replace('[^a-z0-9]', '_')) ~ '.slice',
+        'cpu_quota': r.cpu_quota | default('') | string,
+        'memory_max': r.memory_max | default('') | string}] -%}
+  {%- endfor -%}
+  {%- else -%}
   {%- for target in github_runner_targets -%}
-  {%- for n in range(1, github_runner_instances | int + 1) -%}
-  {%- set ns.items = ns.items | combine({
-        (target.split('/', 1)[1] | replace('/', '-')) ~ '-' ~ n: target}) -%}
+  {%- set ns.items = ns.items + [{
+        'base': target.split('/', 1)[1] | replace('/', '-'),
+        'target': target,
+        'instances': github_runner_instances | int,
+        'labels': github_runner_labels,
+        'slice': github_runner_slice,
+        'cpu_quota': '',
+        'memory_max': ''}] -%}
+  {%- endfor -%}
+  {%- endif -%}
+  {{ ns.items }}
+
+# One entry per systemd instance (github-runner@<name>.service): its target,
+# labels and slice. <name> is <owner>-<repo>-<n>, or <owner>-<repo>-<runner>-<n>
+# with github_runners.
+github_runner_instance_settings: >-
+  {%- set ns = namespace(items={}) -%}
+  {%- for group in github_runner_groups -%}
+  {%- for n in range(1, group.instances + 1) -%}
+  {%- set ns.items = ns.items | combine({group.base ~ '-' ~ n: {
+        'target': group.target, 'labels': group.labels, 'slice': group.slice}}) -%}
   {%- endfor -%}
   {%- endfor -%}
   {{ ns.items }}
+github_runner_wanted: >-
+  {{ dict(github_runner_instance_settings.keys()
+          | zip(github_runner_instance_settings.values() | map(attribute='target'))) }}
+
+# The slices of github_runners' groups, inside github_runner_slice.
+github_runner_child_slices: >-
+  {{ github_runner_groups | rejectattr('slice', 'eq', github_runner_slice) | list }}
+
+# The private repositories the runners serve, checked before they start.
+github_runner_lookup_repos: >-
+  {{ github_runner_groups | map(attribute='target') | select('match', '^repos/')
+     | map('regex_replace', '^repos/', '') | unique | list }}
 
 # Instance names drop the slash and their compose projects the case, so a-b/c
-# and a/b-c, A/b and a/b, or a repository listed twice, would share one.
+# and a/b-c, A/b and a/b, or a repository listed twice, would share one. The
+# slices of github_runners also drop dots and dashes.
 github_runner_names_unique: >-
   {{ github_runner_wanted.keys() | map('lower') | unique | list | length
-     == github_runner_targets | length * github_runner_instances | int }}
+     == github_runner_groups | map(attribute='instances') | sum
+     and github_runner_child_slices | map(attribute='slice') | unique | list | length
+     == github_runner_child_slices | length }}
