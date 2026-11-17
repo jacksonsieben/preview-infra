@@ -10,7 +10,8 @@ is called or changed. Checks that only private repositories (and organization
 runner groups closed to public ones) get a runner, before every registration
 and while the runner waits or runs, that the just-in-time config reaches only
 `compose up`, that the registration is removed when the job ends or the
-service stops, and the tool cache modes.
+service stops, the tool cache modes, and the runners of github_runners, each
+with its own labels and slice.
 """
 import json
 import os
@@ -33,7 +34,8 @@ FAKE_DOCKER = r'''#!/usr/bin/env python3
 import json, os, sys, time
 args = sys.argv[1:]
 with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
-    log.write(json.dumps({"args": args, "jit": os.environ.get("ACTIONS_RUNNER_INPUT_JITCONFIG")}) + "\n")
+    log.write(json.dumps({"args": args, "jit": os.environ.get("ACTIONS_RUNNER_INPUT_JITCONFIG"),
+                          "slice": os.environ.get("RUNNER_SLICE")}) + "\n")
 marker = os.environ["FAKE_DOCKER_LOG"] + ".down"
 if args[:1] == ["info"]:
     print(os.environ["FAKE_DOCKER_ROOT"])
@@ -141,11 +143,16 @@ class Job:
         config = {
             "api": f"http://127.0.0.1:{self.port}",
             "instances": {"you-private-1": "repos/you/private", "you-public-1": "repos/you/public",
-                          "you-gone-1": "repos/you/gone", "acme-1": "orgs/acme", "open-1": "orgs/open"},
+                          "you-gone-1": "repos/you/gone", "acme-1": "orgs/acme", "open-1": "orgs/open",
+                          "you-private-light-1": {"target": "repos/you/private",
+                                                  "labels": ["self-hosted", "ARM64", "ci-1", "ci-light"],
+                                                  "slice": "github_runner-you_private_light.slice"},
+                          "you-public-light-1": {"target": "repos/you/public", "labels": ["ci-light"],
+                                                 "slice": "github_runner-you_public_light.slice"}},
             "labels": ["self-hosted", "linux", "x64", "preview-host"],
             "runner_group_id": 1, "name_prefix": "preview-host", "data_dir": self.data_dir,
             "uid": os.getuid(), "min_free_disk_gb": 0, "tool_cache_max_gb": 5,
-            "visibility_check_seconds": 300,
+            "visibility_check_seconds": 300, "slice": "github_runner.slice",
         }
         config.update(settings)
         with open(os.path.join(self.config_dir, "config.json"), "w") as f:
@@ -209,6 +216,8 @@ def main():
         check([c["args"] for c in job.docker() if c["jit"] == JIT] == [c["args"] for c in job.docker() if "up" in c["args"]],
               "the just-in-time config reaches only compose up")
         check(TOKEN not in out and JIT not in out, "neither the token nor the config is printed", out)
+        check({c["slice"] for c in job.docker() if "compose" in c["args"]} == {"github_runner.slice"},
+              "its containers go into the shared slice")
 
         print("# 2. repositories that are not private")
         for instance, why in (("you-public-1", "is not private"), ("you-gone-1", "HTTP 404")):
@@ -293,6 +302,24 @@ def main():
         open(work, "w").close()
         job.run("you-private-1")
         check(not os.path.exists(work), "the work directory is emptied for every job")
+
+        print("# 10. several runners per repository (github_runners)")
+        api.reset()
+        rc, out = job.run("you-private-light-1")
+        post = api.calls("POST")
+        check(rc == 0 and post and post[0][1] == "/repos/you/private/actions/runners/generate-jitconfig"
+              and post[0][3]["labels"] == ["self-hosted", "ARM64", "ci-1", "ci-light"]
+              and post[0][3]["name"].startswith("preview-host-you-private-light-1-"),
+              "registers on its repository with its own labels", out)
+        check({c["slice"] for c in job.docker() if "compose" in c["args"]}
+              == {"github_runner-you_private_light.slice"}, "its containers go into its own slice")
+        check(os.path.isdir(os.path.join(job.data_dir, "you-private-light-1", "work"))
+              and os.path.isdir(os.path.join(job.data_dir, "you-private-light-1", "tool-cache")),
+              "it has its own work directory and tool cache")
+        api.reset()
+        rc, out = job.run("you-public-light-1")
+        check(rc == REFUSED and "is not private" in out and not api.calls("POST"),
+              "a runner of the list on a public repository is refused", out)
 
     server.shutdown()
     print(f"\n{len(FAILED)} failed" if FAILED else "\nall passed")
