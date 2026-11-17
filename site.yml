@@ -160,6 +160,7 @@
         github_runner_org: "{{ ci_host_runner_org }}"
         github_runner_instances: "{{ ci_host_runner_instances }}"
         github_runner_labels: "{{ ci_host_runner_labels }}"
+        github_runners: "{{ ci_host_runners }}"
         github_runner_cpu_quota: "{{ ci_host_runner_cpu_quota }}"
         github_runner_memory_max: "{{ ci_host_runner_memory_max }}"
         github_runner_min_free_disk_gb: "{{ ci_host_runner_min_free_disk_gb }}"

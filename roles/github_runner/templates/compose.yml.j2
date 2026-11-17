@@ -29,7 +29,7 @@ services:
       - dind-sock:/run/dind
       - tmp:/tmp
 {% endif %}
-    cgroup_parent: {{ github_runner_slice }}
+    cgroup_parent: ${RUNNER_SLICE:-{{ github_runner_slice }}}
 {% if github_runner_docker %}
 
   # The job's Docker daemon. Builds, service containers and `container:` jobs
@@ -53,7 +53,7 @@ services:
       - ${RUNNER_TOOL_CACHE_DIR:?}:/opt/hostedtoolcache
       - externals:/home/runner/externals
       - tmp:/tmp
-    cgroup_parent: {{ github_runner_slice }}
+    cgroup_parent: ${RUNNER_SLICE:-{{ github_runner_slice }}}
     depends_on:
       - runner
 

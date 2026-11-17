@@ -132,9 +132,16 @@ def main():
     instance = sys.argv[1]
     with open(f"{CONFIG_DIR}/config.json") as f:
         config = json.load(f)
-    target = config["instances"].get(instance)
-    if target is None:
+    entry = config["instances"].get(instance)
+    if entry is None:
         raise Refused(f"{instance} is not in {CONFIG_DIR}/config.json")
+    # An instance is its target alone, or its target with its own labels and
+    # systemd slice (github_runners).
+    if isinstance(entry, str):
+        entry = {"target": entry}
+    target = entry["target"]
+    labels = entry.get("labels", config["labels"])
+    cgroup_slice = entry.get("slice", config.get("slice", "github_runner.slice"))
     with open(f"{CONFIG_DIR}/token") as f:
         token = f.read().strip()
 
@@ -152,7 +159,7 @@ def main():
 
     project = "ghr-" + re.sub(r"[^a-z0-9_-]", "_", instance.lower())
     compose = ["docker", "compose", "--project-name", project, "--file", f"{CONFIG_DIR}/compose.yml"]
-    env = dict(os.environ, RUNNER_WORK=work, RUNNER_TOOL_CACHE_DIR=tool_cache)
+    env = dict(os.environ, RUNNER_WORK=work, RUNNER_TOOL_CACHE_DIR=tool_cache, RUNNER_SLICE=cgroup_slice)
     down = compose + ["down", "--volumes", "--remove-orphans", "--timeout", "10"]
     # Leftovers of a job cut short (crash, power loss).
     subprocess.run(down, env=env, check=False)
@@ -169,7 +176,7 @@ def main():
             registration = api(config, token, "POST", f"/{target}/actions/runners/generate-jitconfig", {
                 "name": f"{config['name_prefix']}-{instance}-{int(time.time())}",
                 "runner_group_id": config["runner_group_id"] if target.startswith("orgs/") else 1,
-                "labels": config["labels"],
+                "labels": labels,
                 "work_folder": "_work",
             })
             runner_id = registration["runner"]["id"]

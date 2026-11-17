@@ -3,7 +3,7 @@
   ansible.builtin.assert:
     that:
       - github_runner_scope in ['repo', 'org']
-      - github_runner_scope != 'repo' or github_runner_repos | length > 0
+      - github_runner_scope != 'repo' or github_runner_repos | length > 0 or github_runners | length > 0
       - github_runner_repos | reject('match', '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') | list | length == 0
       - github_runner_scope != 'org' or github_runner_org is match('^[A-Za-z0-9-]+$')
       - github_runner_instances | int >= 1
@@ -14,6 +14,41 @@
       (README, GitHub Actions runner).
     quiet: true
 
+# github_runners replaces github_runner_repos and github_runner_instances;
+# with both set, one of them would be ignored without a word.
+- name: Check the list of runners
+  ansible.builtin.assert:
+    that:
+      - github_runners is sequence and github_runners is not string
+      - github_runners | length == 0 or github_runner_scope == 'repo'
+      - github_runners | length == 0 or github_runner_repos | length == 0
+    fail_msg: >-
+      github_runners (ci_host_runners on ci-1) is a list of repository runners
+      and replaces github_runner_repos and github_runner_instances: with it,
+      leave github_runner_repos (ci_host_runner_repos) empty and the scope
+      repo (README, Several runners per repository).
+    quiet: true
+
+- name: Check each runner of the list
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.repo | default('') is match('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
+      - item.name | default('') is match('^[a-z0-9_]+$')
+      - item.labels | default([]) is sequence and item.labels | default([]) is not string
+      - item.labels | default([]) | reject('match', '^[A-Za-z0-9_.-]+$') | list | length == 0
+      - item.instances | default(1) | int >= 1
+      - item.cpu_quota | default('') | string is match('^([0-9]+%)?$')
+      - item.memory_max | default('') | string is match('^([0-9]+[KMGT]?)?$')
+    fail_msg: >-
+      Each entry of github_runners (ci_host_runners) needs repo (owner/name)
+      and name (lowercase letters, digits, _), and may have labels (a list),
+      instances (1 or more), cpu_quota (e.g. 50%) and memory_max (e.g. 2G).
+    quiet: true
+  loop: "{{ github_runners }}"
+  loop_control:
+    label: "{{ item.repo | default('?') }} {{ item.name | default('?') }}"
+
 # a-b/c and a/b-c, or a repository listed twice, would share a name and one
 # would silently replace the other (github_runner_names_unique).
 - name: Check that every runner instance has its own name
@@ -21,9 +56,10 @@
     that:
       - github_runner_names_unique | bool
     fail_msg: >-
-      Two entries of github_runner_repos give the same runner name once the
-      slash is dropped ({{ github_runner_wanted.keys() | list | join(', ') }}),
-      or a repository is listed twice.
+      Two runners get the same name once the slash is dropped
+      ({{ github_runner_wanted.keys() | list | join(', ') }}), or the same
+      slice ({{ github_runner_child_slices | map(attribute='slice') | join(', ') }}):
+      a repository, or a repository and runner name, is listed twice.
     quiet: true
 
 - name: Check the runner token
@@ -47,7 +83,7 @@
       Accept: application/vnd.github+json
       X-GitHub-Api-Version: "2022-11-28"
     status_code: [200, 401, 403, 404]
-  loop: "{{ github_runner_repos if github_runner_scope == 'repo' else [] }}"
+  loop: "{{ github_runner_lookup_repos }}"
   register: github_runner_repo_lookup
   check_mode: false
   no_log: true
@@ -139,8 +175,9 @@
   vars:
     github_runner_settings:
       api: "{{ github_api }}"
-      instances: "{{ github_runner_wanted }}"
+      instances: "{{ github_runner_instance_settings }}"
       labels: "{{ github_runner_labels }}"
+      slice: "{{ github_runner_slice }}"
       runner_group_id: "{{ github_runner_group_id | int }}"
       name_prefix: "{{ github_runner_name_prefix }}"
       data_dir: "{{ github_runner_data_dir }}"
@@ -177,6 +214,35 @@
     - github-runner@.service
     - github-runner-update.service
     - github-runner-update.timer
+  notify: Reload systemd for the runners
+
+# The slices of github_runners' groups, each inside github_runner_slice with
+# its own limits: a light runner capped low cannot starve a heavy one.
+- name: Install the slices of the runner list
+  ansible.builtin.template:
+    src: github_runner-child.slice.j2
+    dest: "/etc/systemd/system/{{ item.slice }}"
+    mode: "0644"
+  loop: "{{ github_runner_child_slices }}"
+  loop_control:
+    label: "{{ item.slice }}"
+  notify: Reload systemd for the runners
+
+- name: Find the slices of runners no longer listed
+  ansible.builtin.find:
+    paths: /etc/systemd/system
+    patterns: "{{ github_runner_slice | regex_replace('\\.slice$', '') }}-*.slice"
+    file_type: file
+  register: github_runner_slice_files
+
+- name: Remove the slices of runners no longer listed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ github_runner_slice_files.files | map(attribute='path') | map('basename')
+       | difference(github_runner_child_slices | map(attribute='slice'))
+       | map('regex_replace', '^', '/etc/systemd/system/') | list }}
   notify: Reload systemd for the runners
 
 - name: Pull the runner images
