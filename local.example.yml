@@ -96,6 +96,19 @@ coolify_apps:
 # ci_host_runner_enabled: true
 # ci_host_runner_repos:
 #   - your-user/private-repo
+#
+# Or several runners per repository, by capability label (README, Several
+# runners per repository), instead of ci_host_runner_repos. Both keep the
+# ci-1 label until the workflows use ci-heavy / ci-light.
+# ci_host_runners:
+#   - repo: your-user/private-repo
+#     name: heavy
+#     labels: [ci-heavy]
+#   - repo: your-user/private-repo
+#     name: light
+#     labels: [ci-light]
+#     cpu_quota: 50%
+#     memory_max: 2G
 
 # PR previews on ci-1 instead of here (README, Previews on ci-1). Coolify
 # here builds and runs them there; ci-1 publishes them through its own

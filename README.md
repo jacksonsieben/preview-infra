@@ -477,7 +477,7 @@ a task is reported, not that it changes nothing.
 `ansible-playbook tests/coolify_build_limit.yml` checks the build limit task
 against a stand-in for `docker`.
 `ansible-playbook tests/github_runner_settings.yml` checks the runner instance
-names and defaults, and `python3 tests/github_runner_job.py` runs
+names, labels, slices and defaults, with and without `github_runners`, and `python3 tests/github_runner_job.py` runs
 `github-runner-job` against a fake GitHub API.
 `ansible-playbook tests/ci_previews_settings.yml` checks the routes, hosts and
 Traefik file of the previews on `ci-1`, `ansible-playbook
@@ -682,7 +682,9 @@ using GitHub's minutes. The `github_runner` role is off by default
 (`ghcr.io/actions/actions-runner`), **one job per container**:
 
 - `github-runner@<owner>-<repo>-<n>.service`, `github_runner_instances` of
-  them per repository. Each runner takes one job at a time.
+  them per repository. Each runner takes one job at a time. To give a
+  repository several runners with labels of their own (a heavy one and a
+  light one), see [Several runners per repository](#several-runners-per-repository).
 - For every job, `github-runner-job` checks that the repository is private,
   registers a just-in-time runner on GitHub that is valid for that single job,
   and starts it with `docker compose`, next to its own Docker daemon. When the
@@ -765,7 +767,7 @@ using GitHub's minutes. The `github_runner` role is off by default
    `github_runner_enabled: false` it also deletes `/etc/github-runner/token`.
 3. Revoke the token on GitHub. The other files stay on the host; to remove
    them too:
-   `sudo rm -r /etc/github-runner /var/lib/github-runner /usr/local/bin/github-runner-* /etc/systemd/system/github-runner* /etc/systemd/system/github_runner.slice && sudo systemctl daemon-reload`.
+   `sudo rm -r /etc/github-runner /var/lib/github-runner /usr/local/bin/github-runner-* /etc/systemd/system/github-runner* /etc/systemd/system/github_runner*.slice && sudo systemctl daemon-reload`.
 
 ### Limits
 
@@ -781,7 +783,10 @@ That way the jobs cannot take the CPU or memory the previews need:
 | `github_runner_min_free_disk_gb` | `20` | a runner waits for this much free disk before it takes a job |
 
 Under contention, the runners also get half the CPU and disk weight of
-everything else. Check the usage with `systemd-cgtop github_runner.slice`. The
+everything else. With `github_runners`, each entry also gets a slice of its own
+inside it, with its own limits
+([Several runners per repository](#several-runners-per-repository)). Check the
+usage with `systemd-cgtop github_runner.slice`. The
 limits need Docker's systemd cgroup driver, the default with cgroup v2; the
 playbook stops if Docker uses another one.
 
@@ -995,6 +1000,62 @@ cover it.
 | `ci_host_runner_cpu_quota` | `200%` | both cores |
 | `ci_host_runner_memory_max` | `8G` | leaves 4 GB to the system and Docker |
 | `ci_host_runner_min_free_disk_gb` | `20` | |
+| `ci_host_runners` | `[]` | several runners per repository, below |
+
+### Several runners per repository
+
+With one runner per repository, a 30-second lint waits behind a 15-minute
+E2E. `ci_host_runners` (`github_runners` on the preview host) gives a
+repository several runners, each with labels of its own, its own
+`github-runner@` unit, compose project, work directory, tool cache and
+limits. Nothing about the layout is in the code; for `ci-1` (2 cores, 12 GB):
+
+```yaml
+ci_host_runner_enabled: true
+ci_host_runner_repos: []             # replaced by the list below
+ci_host_runners:
+  - repo: your-user/private-repo
+    name: heavy                      # Rust builds, browser E2E
+    labels: [ci-heavy]
+  - repo: your-user/private-repo
+    name: light                      # change detection, lint, audit, migrations, docs
+    labels: [ci-light]
+    cpu_quota: 50%                   # half a core
+    memory_max: 2G
+```
+
+- **Each entry** has `repo` and `name` (lowercase letters, digits, `_`), and
+  may have `labels`, `instances` (default 1), `cpu_quota` and `memory_max`.
+  The list replaces `ci_host_runner_repos` and `ci_host_runner_instances`:
+  the playbook stops if both are set. Repository runners only (scope `repo`).
+- **Units.** `github-runner@<owner>-<repo>-<name>-<n>.service`, with its work
+  directory and tool cache in `/var/lib/github-runner/<owner>-<repo>-<name>-<n>/`.
+  On GitHub: `ci-1-<owner>-<repo>-<name>-<n>-<time>`.
+- **Limits.** Each entry's jobs run in a slice of their own,
+  `github_runner-<owner>_<repo>_<name>.slice`, inside `github_runner.slice`,
+  whose limits (`ci_host_runner_cpu_quota`, `ci_host_runner_memory_max`)
+  still cap all of them together. The light runner above never takes more
+  than half a core and 2 GB, so the heavy one keeps at least 1.5 cores and
+  6 GB. An entry without limits gets only the shared ones; its instances
+  share its slice. `systemd-cgtop github_runner.slice` shows each one.
+- **Labels describe capability, not the machine:** `ci-heavy`, `ci-light`
+  and the arch (`ARM64`). A later CI router chooses by label, and other CI
+  machines can join with the same labels. Each runner registers with
+  `ci_host_runner_labels` plus its own, so the one above carries
+  `[self-hosted, linux, ARM64, ci-1, ci-heavy]` or `[..., ci-1, ci-light]`.
+  Workflows pick one with `runs-on: [self-hosted, ARM64, ci-light]`.
+- **Keep `ci-1` on both runners for now.** Jobs already in the queue, and
+  workflows not yet moved, ask for `[self-hosted, ARM64, ci-1]`: with `ci-1`
+  on both runners either one takes them, and nothing is stranded. Move every
+  workflow of the listed repositories to `ci-heavy` or `ci-light` first. Drop
+  `ci-1` (`ci_host_runner_labels: [self-hosted, linux, ARM64]`) only once no
+  workflow on any branch still says `ci-1` and no job waits for it
+  (`gh run list --status queued`); a job that still asks for it then waits in
+  the queue until it is cancelled.
+- **Switching** from `ci_host_runner_repos` stops the old
+  `github-runner@<owner>-<repo>-<n>` and cancels a job it is running: switch
+  while it is idle. Taking an entry out stops its runners and removes its
+  slice.
 
 **ARM.** Jobs run on `linux/arm64`:
 
@@ -1187,7 +1248,7 @@ What is still open, and why:
 | | Memory | |
 |---|---|---|
 | system, Docker, Tailscale, cloudflared, Traefik, preview-access | ~0.6 GB | no limit |
-| Actions runners and their jobs (`github_runner.slice`) | up to 8 GB | `ci_host_runner_memory_max`, no swap |
+| Actions runners and their jobs (`github_runner.slice`) | up to 8 GB | `ci_host_runner_memory_max`, no swap; a light runner of `ci_host_runners` its own `memory_max` within it |
 | previews | up to 3 GB | `ci_previews_max` × `ci_previews_memory`, no swap |
 | one preview build | ~2-3 GB | no limit; it may swap |
 | `memory-floor` | 0 to 3.6 GB | holds memory only while the rest uses less than 30% |
