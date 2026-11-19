@@ -1,0 +1,27 @@
+---
+# What a run of site.yml would change in Coolify's applications, without
+# changing it (README, Plan the applications):
+#
+#   ansible-playbook apps_plan.yml
+#
+# Runs only the coolify_apps role, with coolify_apps_plan: every application of
+# coolify_apps is read through Coolify's API and compared, and one line per app
+# says what a run would send (its PATCH, a new volume, the names of the
+# environment variables it would create, update or delete), or "no change".
+# Nothing is created, changed, deployed or logged in to. The API session is
+# opened and closed as in a run: a short-lived token, deleted at the end, and
+# the API put back the way it was.
+- name: Plan of the Coolify applications
+  hosts: preview
+  become: true
+  gather_facts: false
+  vars:
+    coolify_apps_plan: true
+  pre_tasks:
+    - name: Check the applications
+      ansible.builtin.include_role:
+        name: coolify_apps
+        tasks_from: checks
+  roles:
+    - role: coolify_apps
+      when: coolify_apps | length > 0
