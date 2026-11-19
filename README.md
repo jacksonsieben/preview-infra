@@ -299,53 +299,76 @@ too, so a local process can't skip the login either (see
 `curl -H 'Host: preview-infra-check.example.dev' http://127.0.0.1/` is not
 refused with 403.
 
-**Per app:** describe it in `local.yml`, under `preview_apps`. Unlike
-`coolify_apps` ([Step 4](#step-4--connect-github-and-a-project)), whose
-previews are always on `domain` and which set no health check or storage,
-these are created by hand in Coolify: the playbook checks that the app's zone
-is routed and protected and, at the end, prints the values to enter. A
-repository goes in one list or the other, never both. For
-Luotsi, the values come from its `Dockerfile` (port 8740, health check on
-`GET /api/v1/status`, data and secrets key in the `/data` volume):
+**Per app:** an entry of `coolify_apps`, as in
+[Step 4](#step-4--connect-github-and-a-project), with the zone it lives on.
+The playbook creates the application, or corrects the one already in
+Coolify, like any other. Every domain of an entry must be routed here (the
+wildcard of `domain` or of a zone, or `production_hostnames`), or the run
+stops before it changes anything. The values come from the app's
+`Dockerfile`:
 
 ```yaml
-preview_apps:
-  - name: luotsi
-    repository: jacksonsieben/luotsi
-    zone: example.dev                 # your zone
+coolify_apps:
+  - repo: you/myapp
+    name: myapp                       # optional: picks one of several apps of the repo
+    project: MyApp
+    zone: example.dev                 # `domain` (the default) or one of preview_zones
+    preview_name: ""                  # previews at pr-<n>.example.dev
     port: 8740                        # the port the image listens on (EXPOSE)
-    healthcheck_path: /api/v1/status  # GET, 200 when ready
-    data_path: /data                  # where the image keeps its data, if anywhere
+    healthcheck_path: /health         # optional: GET, 200 when ready
+    data_path: /data                  # optional: where the image keeps its data
 ```
 
-Then create it in Coolify: **Projects → + Add → Resource → Private Repository
-(with GitHub App)**, the repository and the `main` branch, and the values
-printed at the end of the run. Also:
-
-1. On GitHub → Settings → Applications → your Coolify GitHub App →
-   *Configure*, add the repository to *Repository access*.
-2. **Domains:** `http://main.example.dev` (the `main` branch). It is behind
-   Access too.
-3. **Health check:** on, with the path and port printed. Coolify runs it
-   inside the container with `curl` or `wget`; an image without either needs
-   its own `HEALTHCHECK` instead, with Coolify's turned off.
-4. **Preview URL Template:** `pr-{{pr_id}}.example.dev`. With several apps
-   on one zone, set `preview_name` on each and use the printed template
-   (`pr-{{pr_id}}-<preview_name>.example.dev`).
-5. **Persistent Storage** (only with `data_path`): + Add → *Volume Mount*,
-   destination path `data_path`. Leave the preview suffix on: each preview
-   gets its own `<volume>-pr-<n>`, empty at the start, and Coolify deletes it
-   with the preview. Never a bind mount (*Directory Mount*): previews would
-   share it with `main`. An image that declares `VOLUME` (Luotsi does, for
-   `/data`) needs this mount: without it, every deploy leaves an anonymous
-   volume behind that nothing removes.
-6. **Environment Variables:** add nothing that grants access elsewhere (a
-   GitHub token, a runner address), in either list. Previews start empty.
-   What the app needs goes in `preview_env` / `production_env` in `local.yml`
-   ([Environment variables](#environment-variables)); the next run sets it.
+- **Domains.** Left out, production is at `main-<preview_name>.<zone>`:
+  `main.example.dev` here, behind Access too. Previews are at
+  `pr-<n>-<preview_name>.<zone>`, or `pr-<n>.<zone>` with `preview_name: ""`.
+  With several apps on one zone, give each its own `preview_name`.
+- **Health check** (with `healthcheck_path`): on, with that path and `port`.
+  Coolify runs it inside the container with `curl` or `wget`; an image
+  without either needs its own `HEALTHCHECK` instead, and no
+  `healthcheck_path`.
+- **Persistent storage** (with `data_path`): a volume mounted there. Coolify
+  gives each preview its own `<volume>-pr-<n>`, empty at the start, and
+  deletes it with the preview. An image that declares `VOLUME` needs this
+  mount: without it, every deploy leaves an anonymous volume behind that
+  nothing removes. A volume is only ever added: one at a path no longer
+  listed keeps its data until you delete it in Coolify.
+- **On GitHub** → Settings → Applications → your Coolify GitHub App →
+  *Configure*, add the repository to *Repository access*.
+- **Environment variables:** add nothing that grants access elsewhere (a
+  GitHub token, a runner address), in either list. Previews start empty.
+  What the app needs goes in `preview_env` / `production_env`
+  ([Environment variables](#environment-variables)).
 
 Open a PR: the GitHub App comments on it with the preview link, and updates
 the comment on every push.
+
+### Plan the applications
+
+Before the first run over applications already in Coolify (moving from the
+old `preview_apps` list, or apps made by hand), see what a run would change:
+
+```bash
+ansible-playbook apps_plan.yml
+```
+
+It runs the same checks as `site.yml`, then reads each application through
+Coolify's API and prints one line for it, sending nothing:
+
+```text
+you/site: no change
+myapp: a run sends PATCH {"preview_url_template": "pr-{{pr_id}}.example.dev"}; now {"preview_url_template": "pr-{{pr_id}}-preview.example.dev"}
+you/myapp: a run adds a volume at /data
+you/new: not in Coolify; a run creates it in project New (production) with {...}, its environment variables, then deploys it
+```
+
+plus the names of the environment variables a run would create, update or
+delete (never their values). A PATCH that changes the domains, the port, the
+build or the image's tag redeploys the app (`"instant_deploy": true`); the
+others take effect on its next deployment. When every line is what you want,
+run the playbook. `preview_apps` in `local.yml` stops both: each of its
+entries becomes one of `coolify_apps` (`repository` is `repo`, and it needs
+the `project` its application is in).
 
 ### Tailnet-only zones
 
@@ -418,17 +441,16 @@ Zero Trust until you delete it there (Access → Applications →
 
 ## Environment variables
 
-Any entry of `coolify_apps` or `preview_apps` can set environment variables,
-which the playbook writes through Coolify's API on every run:
+Any entry of `coolify_apps` can set environment variables, which the
+playbook writes through Coolify's API on every run:
 
 ```yaml
-preview_apps:
-  - name: luotsi
-    repository: jacksonsieben/luotsi
+coolify_apps:
+  - repo: you/myapp
     # ...
     preview_env:                      # only in PR deployments (is_preview: true)
-      LUOTSI_PREVIEW: "1"
-      LUOTSI_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'Luotsi preview code', field='credential', vault='Ansible') }}"
+      MYAPP_PREVIEW: "1"
+      MYAPP_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'MyApp preview code', field='credential', vault='Ansible') }}"
     production_env: {}                # only in production (is_preview: false)
 ```
 
@@ -450,8 +472,6 @@ preview_apps:
 - **As written, at runtime.** Values are literal (no `$VAR` expansion) and
   are not build arguments, which could end up in the image. Coolify applies a
   change on the app's next deployment: push to the PR, or redeploy `main`.
-- A `preview_apps` entry that sets variables must already exist in Coolify. It
-  is found by its repository, and by `name` when there are several.
 
 To compare the values, the run mints a second short-lived token that can read
 Coolify's secrets, only when some app sets variables. Only the tasks that set
@@ -587,15 +607,13 @@ this value, so change it in `local.yml`, not in the dashboard. Deployments wait
 longer when several are queued, and past *Deployment Queue Limit* (25 by
 default) Coolify refuses new ones.
 
-**Previews on demand.** With `previews: false` on an entry of `coolify_apps` or
-`preview_apps`, pushes and new PRs no longer build a preview. Production keeps
-following `auto_deploy`. On a `preview_apps` entry, leaving `previews` out keeps
-whatever Coolify has.
+**Previews on demand.** With `previews: false` on an entry of `coolify_apps`,
+pushes and new PRs no longer build a preview. Production keeps following
+`auto_deploy`.
 
 ```yaml
-preview_apps:
-  - name: myapp
-    repository: you/myapp
+coolify_apps:
+  - repo: you/myapp
     previews: false
     # ...
 ```
@@ -1240,29 +1258,33 @@ the application it belongs to. An app whose production stays on the preview
 host gets a second Coolify application from the same repository, on `ci-1`,
 with *Preview Deployments* on, and the first one gets them off. The one on
 `ci-1` is never deployed itself: the playbook keeps its *Auto Deploy* off
-(pushes to `main` skip it), and its domain (`previews.<zone>`, printed at the
-end of the run) is refused there anyway. Its `preview_apps` entry has
-`server` and `network`:
+(pushes to `main` skip it), and its domain (`previews.<zone>` with
+`preview_name: ""`, set by the playbook) is refused there anyway. It is made by
+hand once (below); the playbook finds it by `repo` and `name`, corrects it,
+and never creates it. Its `coolify_apps` entry has `server` and `network`:
 
 ```yaml
-preview_apps:
-  - name: myapp                    # production, on the preview host
-    repository: you/myapp
+coolify_apps:
+  - repo: you/myapp                # production, on the preview host
+    name: myapp
+    project: MyApp
     zone: example.dev
+    preview_name: ""
     port: 8740
     healthcheck_path: /health
     data_path: /data
     previews: false
     production_env: {}
-  - name: myapp-previews           # its PR previews, on ci-1
-    repository: you/myapp
+  - repo: you/myapp                # its PR previews, on ci-1
+    name: myapp-previews
+    project: MyApp
     zone: example.dev
+    preview_name: ""
     port: 8740
     healthcheck_path: /health
     data_path: /data
     server: ci-1                   # ci_previews_coolify_server
     network: myapp                 # one of ci_previews_networks
-    previews: true
     memory: 768m                   # optional: ci_previews_memory otherwise
     preview_env: {}
 ```
@@ -1315,7 +1337,7 @@ What is still open, and why:
 ### Limits
 
 - **Each preview:** `ci_previews_cpus` (1) and `ci_previews_memory` (1g),
-  without swap, or `cpus` and `memory` on its `preview_apps` entry. The
+  without swap, or `cpus` and `memory` on its `coolify_apps` entry. The
   playbook sets them in Coolify (*Resource Limits*), which applies them to
   every preview of the app.
 - **At once:** `ci_previews_max` previews (3), all apps together.
@@ -1398,14 +1420,17 @@ to move a wildcard before the preview host has the records of its own names.
    `https://preview-infra-check.<domain>/` answers 403 from `ci-1`.
 7. **The applications on `ci-1`:** for each app, *Projects → the project →
    + Add → Resource → Private Repository (with GitHub App)*, server `ci-1`, destination
-   `previews-<network>`, the repository and `main`, and the values the run
-   printed under *Coolify settings for the preview apps*. Name it as its
-   `preview_apps` entry (`myapp-previews`). Don't press *Deploy*.
-8. **`preview_apps`** in `local.yml` as [above](#previews-on-ci-1):
+   `previews-<network>`, the repository and `main`. Name it as its
+   `coolify_apps` entry (`myapp-previews`); the playbook sets the rest. Don't
+   press *Deploy*.
+8. **`coolify_apps`** in `local.yml` as [above](#previews-on-ci-1):
    `previews: false` on the app that stays, the entry with `server` for the
-   one on `ci-1`, and its `preview_env` moved there. **Run the playbook a
-   third time:** it sets the limits and *Auto Deploy* off on `ci-1`'s apps,
-   previews off on the others, and the variables.
+   one on `ci-1`, and its `preview_env` moved there. Check it with
+   `ansible-playbook apps_plan.yml` ([Plan the
+   applications](#plan-the-applications)), then **run the playbook a third
+   time:** it sets the domains, preview template, health check, limits and
+   *Auto Deploy* off on `ci-1`'s apps, previews off on the others, and the
+   variables.
 9. **Open a test PR** (below).
 
 ### Check
