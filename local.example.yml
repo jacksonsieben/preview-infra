@@ -38,6 +38,20 @@ coolify_apps:
     #   SITE_PREVIEW: "1"
     #   SITE_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'Site preview code', field='credential', vault='Ansible') }}"
     # production_env: {}   # only in production, same format
+  # An app that runs its published image, deployed by its release workflow;
+  # its PR previews stay on an entry that builds the branch (README, Deploy on
+  # release).
+  # - repo: you/app
+  #   name: app
+  #   project: App
+  #   image: ghcr.io/you/app
+  #   image_tag: latest
+  #   domains: ["app.{{ domain }}"]
+  #   port: 8080
+
+# The registry login for a private image: a token with only read:packages.
+# coolify_registry_username: you
+# coolify_registry_token: "{{ lookup('community.general.onepassword', 'GHCR read', field='credential', vault='Ansible') }}"
 
 # Builds at once on this host (default 1). To build one app's previews only on
 # demand, add `previews: false` to its entry (README, Build load).

@@ -457,6 +457,89 @@ To compare the values, the run mints a second short-lived token that can read
 Coolify's secrets, only when some app sets variables. Only the tasks that set
 them use it, all hidden from the output, and it is deleted with the other one.
 
+## Deploy on release
+
+An app can run the image its release workflow publishes instead of building
+`main` on this host: nothing is built here, production changes only on a
+release, and a rollback is a version change. Its PR previews keep building
+the branch, from a second entry.
+
+In `group_vars/all/local.yml`:
+
+```yaml
+coolify_apps:
+  # The PR previews, built from the branch as before. Never deployed itself.
+  # First, so it gives up its domains before the image app takes them.
+  - repo: you/app
+    name: app-previews
+    project: App
+    domains: []
+    auto_deploy: false
+    previews: true
+    preview_name: app
+    port: 8080
+  # Production: the published image, deployed only when asked.
+  - repo: you/app
+    name: app
+    project: App
+    image: ghcr.io/you/app
+    image_tag: latest        # or a version, to pin it
+    domains: ["app.{{ domain }}"]
+    port: 8080
+
+# A private image: a GitHub token with only read:packages. Root on this host
+# logs in with it (the token on stdin, never on a command line or in the
+# output), and Coolify pulls with that login.
+coolify_registry_username: you
+coolify_registry_token: "{{ lookup('community.general.onepassword', 'GHCR read', field='credential', vault='Ansible') }}"
+```
+
+An entry with `image` needs a `name` (the app is found by it), an image
+without a tag, and neither `auto_deploy` nor `previews`. The first run creates
+the app and deploys it once; later runs redeploy it only when `image` or
+`image_tag` changes. The run prints the app's `DEPLOY_WEBHOOK_URL`.
+
+**The release workflow's deploy call.** With an image app, the tunnel also
+serves `https://coolify.<domain>/api/v1/deploy`, that path alone, and
+Coolify's API stays on (the run turns it off again once no app runs an
+image). Every call needs a Coolify API token, so make one for the release:
+
+1. In Coolify, *Keys & Tokens* → *API tokens*, create a token with only the
+   `deploy` permission. Not named `preview-infra`: the playbook deletes that
+   one at the end of every run.
+2. In the app's repository, *Settings* → *Secrets and variables* →
+   *Actions*, add `DEPLOY_WEBHOOK_URL` (the URL the run printed,
+   `https://coolify.<domain>/api/v1/deploy?uuid=<uuid>&force=false`) and
+   `DEPLOY_WEBHOOK_TOKEN` (the token).
+3. After pushing the image, the workflow calls
+   `curl -fsS -H "Authorization: Bearer $DEPLOY_WEBHOOK_TOKEN" "$DEPLOY_WEBHOOK_URL"`.
+
+Neither value goes in this repository. To revoke the token, delete it in
+Coolify and the secret in the repository.
+
+**Moving from an app that builds the branch.** The image app is a new
+Coolify application (one that builds can't be turned into one), so:
+
+1. Give the old app the name and settings of the previews entry above
+   (rename it in Coolify, or use its current name as that entry's `name`),
+   and the image entry a name no other app has. A name already used by an
+   app that builds stops the run.
+2. If the app keeps data (a volume, such as one at `/data`), stop the old
+   app first, then, in the new app's *Persistent Storage*, add a volume with
+   the old one's name and mount path, so it finds the same data.
+3. Run the playbook. The domains move from the old app to the new one.
+
+**Rollback.** Set `image_tag` to the version to go back to (`0.1.1`, say) and
+run the playbook: it redeploys that version. A release then redeploys the
+pinned tag too, so set `image_tag: latest` again once the fix is out.
+
+**Back to building the branch.** Remove `image` and `image_tag` from the
+entry, give the domains back to the entry that builds (with
+`auto_deploy: true`), run the playbook, and delete the image app in Coolify.
+Without an image app the tunnel drops the deploy path and the run turns
+the API off again if it was off; delete the deploy token and the
+repository's secrets too.
+
 ## Pull requests
 
 Every PR fills in `.github/pull_request_template.md`. Its *How to test* section
@@ -468,7 +551,8 @@ for real: the checks are `ansible-playbook site.yml --syntax-check` and
 `ansible-playbook tests/tunnel_routes.yml`, which renders the tunnel routes and
 DNS names offline and fails if production's would change, and
 `python3 tests/coolify_env.py`, which runs the `coolify_apps` role against a
-fake Coolify API and checks the environment variables.
+fake Coolify API and checks the environment variables, the apps that run an
+image and the registry login.
 `python3 tests/check_mode.py` checks that every `uri` task that only reads
 (no `method`, or `GET`) also runs in check mode (`check_mode: false`), so
 `--check --diff` works, and that a `command`/`shell` task runs there only with
@@ -543,7 +627,9 @@ After that:
   `coolify_dashboard: tailscale` only your tailnet reaches it; the tunnel
   serves `coolify.<domain>/webhooks/` alone, and GitHub signs every webhook.
   With `public`, consider Cloudflare Access in front of it, leaving
-  `/webhooks/*` outside the policy.
+  `/webhooks/*` outside the policy. An app that runs an image adds
+  `/api/v1/deploy` to the tunnel ([Deploy on release](#deploy-on-release)),
+  which needs a Coolify token with the `deploy` permission.
 - **PR code can run elsewhere.** With [Previews on ci-1](#previews-on-ci-1),
   Coolify builds and runs the PR previews of those apps on `ci-1`, each app
   on a network that reaches only the internet; this host keeps the webhooks
