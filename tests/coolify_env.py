@@ -11,6 +11,7 @@ updates and deletes only its own variables, keeps preview and production
 apart, that a second run changes nothing, and that no value or the token that
 reads them shows in the output of `ansible-playbook --diff -v`.
 """
+import base64
 import json
 import os
 import re
@@ -29,8 +30,12 @@ SECRETS = {
     "FAKE_PREVIEW_CODE_2": "sentinel-code-b-7f3a",
     "FAKE_PROD_SECRET": "sentinel-prod-9c1e",
 }
+# Only through stdin of `docker login`: never in the output or a command line.
+REGISTRY_TOKEN = "sentinel-ghcr-token-77"
 SEEDED = {"old": "sentinel-old-value-55", "hand": "sentinel-hand-made-31"}
 COMMENT = "Managed by preview-infra (preview_env/production_env in local.yml); deleted when taken out."
+IMAGE_APP_FIELDS = {"project_uuid", "environment_name", "server_uuid", "docker_registry_image_name",
+                    "docker_registry_image_tag", "ports_exposes", "name", "domains", "instant_deploy"}
 ENV_FIELDS = {"key", "value", "is_preview", "is_literal", "is_multiline", "is_shown_once",
               "is_runtime", "is_buildtime", "comment"}
 
@@ -94,7 +99,20 @@ class FakeCoolify:
                 return 201, {"uuid": "envr-1"}
             return (200, {"name": parts[2]}) if parts[2] in project["environments"] else (404, {})
         if (method, path) == ("GET", "/applications"):
-            return 200, [{k: a[k] for k in ("uuid", "name", "git_repository")} for a in self.apps]
+            return 200, [{k: a[k] for k in ("uuid", "name", "git_repository", "build_pack") if k in a}
+                         for a in self.apps]
+        if (method, path) == ("POST", "/applications/dockerimage"):
+            # Like Coolify, refuses a field it doesn't know.
+            extra = set(body) - IMAGE_APP_FIELDS
+            if extra:
+                return 422, {"message": "Validation failed.", "errors": {k: "not allowed" for k in extra}}
+            app = {"uuid": "app-" + uuid.uuid4().hex[:8], "name": body["name"], "build_pack": "dockerimage",
+                   "fqdn": body["domains"], "settings": {}, "created_with": body,
+                   **{k: body[k] for k in ("ports_exposes", "docker_registry_image_name",
+                                           "docker_registry_image_tag")}}
+            self.apps.append(app)
+            self.envs[app["uuid"]] = []
+            return 201, {"uuid": app["uuid"], "domains": body["domains"]}
         if (method, path) == ("POST", "/applications/private-github-app"):
             app_uuid = self.add_app(body["git_repository"], body.get("name", body["git_repository"]))
             app = self.apps[-1]
@@ -189,25 +207,29 @@ class Run:
         self.tmp, self.port, self.count = tmp, port, 0
         self.docker_log = os.path.join(tmp, "docker.log")
 
-    def __call__(self, coolify_apps, preview_apps):
+    def __call__(self, coolify_apps, preview_apps, api_was_enabled=True, **more):
         self.count += 1
         extra = os.path.join(self.tmp, f"case{self.count}.json")
         with open(extra, "w") as f:
             json.dump({"coolify_api": f"http://127.0.0.1:{self.port}/api/v1", "domain": "example.com",
                        "coolify_github_app": "coolify-example",
-                       "coolify_apps": coolify_apps, "preview_apps": preview_apps}, f)
+                       "coolify_apps": coolify_apps, "preview_apps": preview_apps, **more}, f)
         open(self.docker_log, "w").close()
-        env = dict(os.environ, **SECRETS, PATH=os.path.join(ROOT, "tests", "bin") + os.pathsep + os.environ["PATH"],
+        env = dict(os.environ, **SECRETS, FAKE_API_WAS_ENABLED="1" if api_was_enabled else "0", PATH=os.path.join(ROOT, "tests", "bin") + os.pathsep + os.environ["PATH"],
                    FAKE_DOCKER_LOG=self.docker_log, ANSIBLE_CONFIG=os.path.join(ROOT, "ansible.cfg"),
                    ANSIBLE_ROLES_PATH=os.path.join(ROOT, "roles"), ANSIBLE_NOCOLOR="1", ANSIBLE_FORCE_COLOR="0")
         proc = subprocess.run(
             ["ansible-playbook", "-i", "localhost,", "tests/coolify_env.yml", "--diff", "-v", "-e", "@" + extra],
             cwd=ROOT, env=env, capture_output=True, text=True)
         out = proc.stdout + proc.stderr
-        leaked = [s for s in list(SECRETS.values()) + list(SEEDED.values()) + [ENV_TOKEN] if s in out]
+        leaked = [s for s in list(SECRETS.values()) + list(SEEDED.values()) + [ENV_TOKEN, REGISTRY_TOKEN]
+                  if s in out]
         check(not leaked, f"run {self.count}: no value or token in the output" + (f" (found {leaked})" if leaked else ""))
         with open(self.docker_log) as f:
-            self.session = f.readline()
+            self.docker = f.read().splitlines()
+        self.session = next((c for c in self.docker if "createToken" in c), "")
+        self.closing = next((c for c in self.docker if "echo 'closed'" in c), "")
+        check(REGISTRY_TOKEN not in "\n".join(self.docker), f"run {self.count}: no registry token on a command line")
         return proc.returncode, out
 
 
@@ -392,6 +414,72 @@ def main():
         rc, out = run([site()], [preview_app(previews=False), ci_entry(cpus="0.5")])
         check(rc == 0 and (ci_app["limits_cpus"], ci_app["limits_memory"]) == ("0.5", "1g"),
               "the defaults of ci_previews_cpus and _memory, and a limit of its own", out)
+
+        print("# 11. an app that runs a published image")
+        docker_config = os.path.join(tmp, "docker-config.json")
+        registry = {"coolify_registry_username": "you", "coolify_registry_token": REGISTRY_TOKEN,
+                    "coolify_docker_config": docker_config}
+
+        def image_app(**more):
+            return {"repo": "you/app", "name": "app", "project": "App", "image": "ghcr.io/you/app",
+                    "domains": ["app.example.com"], "port": 8740, **more}
+
+        def the_image_app():
+            return next((a for a in api.apps if a.get("name") == "app"), None)
+
+        before = len(api.requests)
+        rc, out = run([site(), image_app()], [], api_was_enabled=False, **registry)
+        check(rc == 0, "the run succeeds", out)
+        app = the_image_app()
+        check(app is not None and app["created_with"]["instant_deploy"] is False
+              and (app["docker_registry_image_name"], app["docker_registry_image_tag"]) == ("ghcr.io/you/app", "latest"),
+              "it is created from ghcr.io/you/app:latest, without deploying", out)
+        if app is None:
+            return 1
+        check(app["settings"].get("is_auto_deploy_enabled") is False
+              and app["settings"].get("is_preview_deployments_enabled") is False,
+              "with auto deploy and previews off")
+        app_writes = [(m, p) for m, p, _ in api.requests[before:] if m != "GET" and app["uuid"] in p]
+        check(app_writes and app_writes[-1] == ("POST", f"/applications/{app['uuid']}/start")
+              and app_writes.count(("POST", f"/applications/{app['uuid']}/start")) == 1,
+              f"and deployed once, at the end ({app_writes})")
+        check(f"https://coolify.example.com/api/v1/deploy?uuid={app['uuid']}&force=false" in out,
+              "the run shows its deploy URL", out)
+        check("login ghcr.io --username you --password-stdin" in run.docker,
+              "root logs in to the registry, the token on stdin")
+        check("is_api_enabled = false" not in run.closing, "the API stays on for the deploy endpoint")
+
+        print("# 12. the same again, logged in already")
+        with open(docker_config, "w") as f:
+            json.dump({"auths": {"ghcr.io": {"auth": base64.b64encode(f"you:{REGISTRY_TOKEN}".encode()).decode()}}}, f)
+        before = len(api.requests)
+        rc, out = run([site(), image_app()], [], api_was_enabled=False, **registry)
+        writes = [r for r in api.requests[before:] if r[0] != "GET"]
+        check(rc == 0 and not writes, f"nothing is written (writes: {writes})", out)
+        check(not [c for c in run.docker if c.startswith("login")], "and no new login")
+        check(recap_changed(out) == 0, "and the recap says changed=0", out)
+
+        print("# 13. a rollback: the tag pinned to a version")
+        before = len(api.requests)
+        rc, out = run([site(), image_app(image_tag="0.1.1")], [], **registry)
+        patches = [r for r in api.requests[before:] if r[:2] == ("PATCH", f"/applications/{app['uuid']}")]
+        check(rc == 0 and app["docker_registry_image_tag"] == "0.1.1", "the app gets the tag 0.1.1", out)
+        check(app.get("instant_deploy") is True and patches, "and is redeployed with it")
+
+        print("# 14. without an image, the API goes back off")
+        rc, out = run([site()], [], api_was_enabled=False)
+        check(rc == 0 and "is_api_enabled = false" in run.closing, "the run turns the API off again", out)
+
+        print("# 15. wrong image entries")
+        before = len(api.requests)
+        rc, out = run([site(), image_app(previews=True)], [])
+        check(rc != 0 and "neither auto_deploy" in out, "previews on an image app stop the run", out)
+        rc, out = run([site(), image_app(name="myapp")], [])
+        check(rc != 0 and "can't be" in out and "turned into an image app" in out,
+              "the name of an app that builds a branch stops the run", out)
+        rc, out = run([site(), image_app(image="ghcr.io/you/app:1.0")], [])
+        check(rc != 0 and "image without a" in out, "a tag in `image` stops the run", out)
+        check(not [r for r in api.requests[before:] if r[0] != "GET"], "and nothing is written")
 
     server.shutdown()
     print(f"\n{len(FAILED)} failed" if FAILED else "\nall passed")

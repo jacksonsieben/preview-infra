@@ -194,3 +194,41 @@
           - cloudflare_local_zones | map(attribute='zone') | list == ['example.net']
           - "'*.example.net' in cloudflare_tunnel_ingress | map(attribute='hostname', default='') | list"
         fail_msg: "Access: {{ cloudflare_access_zones }}. Routes: {{ cloudflare_tunnel_ingress }}"
+
+    # An app that runs a published image (README, Deploy on release): the
+    # release workflow calls Coolify's deploy endpoint, and nothing else of the
+    # API is routed.
+    - name: Run one app from an image
+      ansible.builtin.set_fact:
+        preview_zones: [{zone: example.dev}]
+        coolify_dashboard_hostname: ""
+        coolify_apps:
+          - {repo: you/site, project: Site, domains: [example.com], port: 8080}
+          - {repo: you/app, name: app, project: App, image: ghcr.io/you/app, port: 8740}
+
+    - name: Check that the tunnel serves the deploy endpoint only
+      ansible.builtin.assert:
+        that:
+          - coolify_deploy_endpoint | bool
+          - cloudflare_tunnel_ingress[:3] == expected
+          - cloudflare_tunnel_ingress | selectattr('path', 'defined') | map(attribute='path') | list
+            == ['^/api/v1/deploy$', '^/webhooks/']
+          - cloudflare_tunnel_dns_names[0] == 'coolify.example.com'
+        fail_msg: "Routes: {{ cloudflare_tunnel_ingress }}"
+      vars:
+        expected:
+          - {hostname: coolify.example.com, path: ^/api/v1/deploy$, service: "http://127.0.0.1:8000"}
+          - {hostname: coolify.example.com, path: ^/webhooks/, service: "http://127.0.0.1:8000"}
+          - {hostname: coolify.example.com, service: "http_status:404"}
+
+    - name: Build every app from its branch again
+      ansible.builtin.set_fact:
+        coolify_apps:
+          - {repo: you/site, project: Site, domains: [example.com], port: 8080}
+
+    - name: Check that the deploy endpoint is gone then
+      ansible.builtin.assert:
+        that:
+          - not (coolify_deploy_endpoint | bool)
+          - cloudflare_tunnel_ingress | selectattr('path', 'defined') | map(attribute='path') | list == ['^/webhooks/']
+        fail_msg: "Routes: {{ cloudflare_tunnel_ingress }}"
