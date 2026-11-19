@@ -1,23 +1,47 @@
 ---
 # One entry of coolify_apps. An existing application is found by its repository
-# (and `name`, when given) and only the fields that differ are changed.
+# (and `name`, when given) and only the fields that differ are changed. One with
+# `image` runs that image (README, Deploy on release) and is found by `name`.
 
 # Without the environment variables: set_fact shows its facts with -v. Their
 # values are only read in env.yml, under no_log.
 - name: "Settle the settings of {{ coolify_app_item.repo }}"
   ansible.builtin.set_fact:
     coolify_app: >-
-      {{ coolify_app_defaults | combine(coolify_app_item | dict2items
+      {{ coolify_app_defaults
+         | combine(coolify_image_app_defaults if coolify_app_item.image is defined else {})
+         | combine(coolify_app_item | dict2items
          | rejectattr('key', 'in', ['preview_env', 'production_env']) | items2dict) }}
+
+# An image is not built here, so there is no branch to follow and no PR to
+# preview: those stay on an app that builds the branch.
+- name: "Check the image settings of {{ coolify_app.repo }}"
+  ansible.builtin.assert:
+    that:
+      - coolify_app.name | default('') | length > 0
+      - coolify_app.image is match('^[^:@\\s]+$')
+      - coolify_app.image_tag | string is match('^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$')
+      - not (coolify_app.auto_deploy | bool)
+      - not (coolify_app.previews | bool)
+    fail_msg: >-
+      {{ coolify_app.repo }} has `image`: it needs a `name`, an image without a
+      tag ({{ coolify_app.image }}), a valid image_tag, and neither auto_deploy
+      nor previews (PR previews stay on an entry that builds the branch).
+    quiet: true
+  when: coolify_app.image is defined
 
 - name: "Work out the wanted state of {{ coolify_app.repo }}"
   ansible.builtin.set_fact:
     coolify_app_domains: "{{ coolify_app.domains | map('regex_replace', '^', 'http://') | list }}"
-    coolify_app_wanted:
-      ports_exposes: "{{ coolify_app.port | string }}"
-      git_branch: "{{ coolify_app.branch }}"
-      build_pack: "{{ coolify_app.build_pack }}"
-      preview_url_template: "pr-{{ coolify_pr_placeholder }}-{{ coolify_app.preview_name }}.{{ domain }}"
+    coolify_app_wanted: >-
+      {{ {'ports_exposes': coolify_app.port | string,
+          'docker_registry_image_name': coolify_app.image,
+          'docker_registry_image_tag': coolify_app.image_tag | string}
+         if coolify_app.image is defined else
+         {'ports_exposes': coolify_app.port | string,
+          'git_branch': coolify_app.branch,
+          'build_pack': coolify_app.build_pack,
+          'preview_url_template': 'pr-' ~ coolify_pr_placeholder ~ '-' ~ coolify_app.preview_name ~ '.' ~ domain} }}
     coolify_app_settings_wanted:
       is_auto_deploy_enabled: "{{ coolify_app.auto_deploy | bool }}"
       is_preview_deployments_enabled: "{{ coolify_app.previews | bool }}"
@@ -25,7 +49,9 @@
       # their code on this host.
       is_pr_deployments_public_enabled: false
     coolify_app_matches: >-
-      {{ coolify_applications
+      {{ coolify_applications | selectattr('name', 'equalto', coolify_app.name) | list
+         if coolify_app.image is defined else
+         coolify_applications
          | selectattr('git_repository', 'defined')
          | selectattr('git_repository', 'match', '(?i)^' ~ (coolify_app.repo | regex_escape) ~ '$')
          | list }}
@@ -41,7 +67,8 @@
     fail_msg: >-
       Coolify has several applications for {{ coolify_app.repo }}
       ({{ coolify_app_matches | map(attribute='name') | list }}). Add `name` to
-      its entry in coolify_apps to pick one.
+      its entry in coolify_apps to pick one{{ ', or rename the others in Coolify'
+      if coolify_app.image is defined else '' }}.
     quiet: true
 
 # --- project and environment ------------------------------------------------
@@ -113,7 +140,38 @@
     status_code: 201
   register: coolify_app_created
   changed_when: true
-  when: coolify_app_matches | length == 0
+  when:
+    - coolify_app.image is not defined
+    - coolify_app_matches | length == 0
+
+# Without its settings, which the update below sets (auto deploy off).
+- name: "Create the application for {{ coolify_app.repo }} from {{ coolify_app.image | default('') }}"
+  ansible.builtin.uri:
+    url: "{{ coolify_api }}/applications/dockerimage"
+    method: POST
+    headers: *coolify_headers
+    body_format: json
+    body: >-
+      {{ coolify_app_wanted | combine({
+           'project_uuid': coolify_project_uuid,
+           'environment_name': coolify_app.environment,
+           'server_uuid': coolify_server.uuid,
+           'name': coolify_app.name,
+           'domains': coolify_app_domains | join(','),
+           'instant_deploy': false,
+         }) }}
+    status_code: 201
+  register: coolify_image_app_created
+  changed_when: true
+  when:
+    - coolify_app.image is defined
+    - coolify_app_matches | length == 0
+
+- name: Remember the new application
+  ansible.builtin.set_fact:
+    coolify_app_created: "{{ coolify_image_app_created }}"
+    coolify_app_matches: [{uuid: "{{ coolify_image_app_created.json.uuid }}"}]
+  when: coolify_image_app_created is not skipped
 
 # --- an existing application ------------------------------------------------
 
@@ -123,6 +181,22 @@
     headers: *coolify_headers
   register: coolify_app_current
   when: coolify_app_matches | length == 1
+
+# The name of an app that builds the branch, given to an `image` entry, would
+# otherwise turn it into something else.
+- name: "Check that {{ coolify_app.name | default('') }} runs an image"
+  ansible.builtin.assert:
+    that: coolify_app_current.json.build_pack | default('') == 'dockerimage'
+    fail_msg: >-
+      Coolify's application '{{ coolify_app.name }}' builds
+      {{ coolify_app_current.json.git_repository | default('?') }} with
+      {{ coolify_app_current.json.build_pack | default('?') }}; it can't be
+      turned into an image app. Rename it in Coolify (or give this entry
+      another name), and follow README, Deploy on release.
+    quiet: true
+  when:
+    - coolify_app.image is defined
+    - coolify_app_current is not skipped
 
 # Only the fields that differ go in the request. Settings Coolify didn't return
 # count as different. Domains are compared as a set.
@@ -149,8 +223,9 @@
       {{ ns.patch | to_json }}
   when: coolify_app_current is not skipped
 
-# A change Traefik or the build must see (domains, port, build, branch)
-# redeploys right away; the others take effect on the next deployment.
+# A change Traefik or the build must see (domains, port, build, branch, the
+# image's tag) redeploys right away; the others take effect on the next
+# deployment. A new application is deployed at the end instead.
 - name: "Update the application for {{ coolify_app.repo }}"
   ansible.builtin.uri:
     url: "{{ coolify_api }}/applications/{{ coolify_app_matches[0].uuid }}"
@@ -160,7 +235,9 @@
     body: >-
       {{ coolify_app_patch | from_json | combine(
            {'instant_deploy': true}
-           if (coolify_app_patch | from_json).keys() | intersect(['domains', 'ports_exposes', 'build_pack', 'git_branch'])
+           if coolify_app_created is skipped and (coolify_app_patch | from_json).keys()
+              | intersect(['domains', 'ports_exposes', 'build_pack', 'git_branch',
+                           'docker_registry_image_name', 'docker_registry_image_tag'])
            else {}) }}
   changed_when: true
   when:
@@ -184,3 +261,13 @@
     status_code: 200
   changed_when: true
   when: coolify_app_created is not skipped
+
+# The release workflow's DEPLOY_WEBHOOK_URL (README, Deploy on release). Only
+# this path of the API is on the tunnel; the token is one you make in Coolify.
+- name: "Show the deploy URL of {{ coolify_app.repo }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ coolify_app.name }} runs {{ coolify_app.image }}:{{ coolify_app.image_tag }}.
+      DEPLOY_WEBHOOK_URL: https://{{ coolify_hostname }}/api/v1/deploy?uuid={{
+      coolify_app_created.json.uuid if coolify_app_created is not skipped else coolify_app_matches[0].uuid }}&force=false
+  when: coolify_app.image is defined

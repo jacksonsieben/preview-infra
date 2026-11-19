@@ -47,9 +47,36 @@ production_hostnames: []
 #       previews: true          # false: on demand only (README, Build load)
 #       preview_env: {}         # optional, see "Environment variables" below
 #       production_env: {}
+#
+# An entry with `image` runs a published image instead of building the branch
+# (README, Deploy on release): no build here, no auto deploy, no previews.
+# It needs a `name`, by which it is found in Coolify. The release workflow
+# deploys it through Coolify's deploy endpoint; `image_tag` picks the tag
+# (latest follows the releases; a version pins it, for a rollback).
+#
+#     - repo: you/app
+#       name: app
+#       project: App
+#       image: ghcr.io/you/app
+#       image_tag: latest
+#       domains: ["app.{{ domain }}"]
+#       port: 8080
 # ---------------------------------------------------------------------------
 coolify_github_app: ""
 coolify_apps: []
+
+# A private image's registry: this host logs in to it as root, and Coolify
+# pulls with that login. The token only reads packages (GitHub: a classic
+# token with read:packages); put it in local.yml or 1Password, never in git.
+# Empty: no login (a public image).
+coolify_registry: ghcr.io
+coolify_registry_username: ""
+coolify_registry_token: ""
+
+# On when an entry of coolify_apps has `image`: Coolify's API stays enabled
+# after the run, and the tunnel serves coolify.<domain>/api/v1/deploy (and
+# nothing else of the API) for the release workflow (README, Deploy on release).
+coolify_deploy_endpoint: "{{ coolify_apps | selectattr('image', 'defined') | list | length > 0 }}"
 
 # How many builds Coolify runs at once on this host, previews and production
 # together. The others wait in its queue. A build can use every CPU, so more

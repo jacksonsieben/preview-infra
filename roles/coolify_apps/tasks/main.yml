@@ -8,7 +8,8 @@
 # The API is off by default and needs a token. Each run enables it if needed,
 # mints a short-lived token for the root user (read, write, deploy; no access
 # to sensitive values), and in the end deletes the token and puts the API back
-# the way it was. When an app sets environment variables, a second token may
+# the way it was, unless an app runs an image: then the API stays on for the
+# release workflow's deploy call (coolify_deploy_endpoint). When an app sets environment variables, a second token may
 # also read their values, to compare them; only the no_log tasks of env.yml
 # use it.
 
@@ -17,6 +18,44 @@
     coolify_env_declared: >-
       {{ (coolify_apps + preview_apps) | map(attribute='preview_env', default={}) | select | list | length > 0
          or (coolify_apps + preview_apps) | map(attribute='production_env', default={}) | select | list | length > 0 }}
+
+# A private image (an entry with `image`) is pulled by Coolify with root's
+# Docker login on this host. The token is compared with the login already
+# there, so a run logs in again only when it changed.
+- name: Check the registry login settings
+  ansible.builtin.assert:
+    that: coolify_registry_username | length > 0
+    fail_msg: coolify_registry_token is set, but coolify_registry_username is empty.
+    quiet: true
+  when: coolify_registry_token | length > 0
+
+- name: Read root's registry logins
+  ansible.builtin.slurp:
+    src: "{{ coolify_docker_config }}"
+  register: coolify_docker_config_raw
+  failed_when: false
+  no_log: true
+  when: coolify_registry_token | length > 0
+
+- name: "Log in to {{ coolify_registry }}"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - login
+      - "{{ coolify_registry }}"
+      - --username
+      - "{{ coolify_registry_username }}"
+      - --password-stdin
+    stdin: "{{ coolify_registry_token }}"
+  changed_when: true
+  no_log: true
+  when:
+    - coolify_registry_token | length > 0
+    - not ansible_check_mode
+    - >-
+      ((coolify_docker_config_raw.content | default('e30=') | b64decode | from_json).auths | default({}))
+      .get(coolify_registry, {}).auth | default('')
+      != (coolify_registry_username ~ ':' ~ coolify_registry_token) | b64encode
 
 # Opening the session mints a token (and may turn the API on), so check mode
 # leaves it, and everything that needs it, out.
@@ -167,7 +206,7 @@
           - --execute
           - >-
             App\Models\User::find(0)->tokens()->where('name', 'preview-infra')->delete();
-            {% if not (coolify_api_session.api_was_enabled | default(true)) %}
+            {% if not (coolify_api_session.api_was_enabled | default(true)) and not (coolify_deploy_endpoint | bool) %}
             $s = App\Models\InstanceSettings::get(); $s->is_api_enabled = false; $s->save();
             {% endif %}
             echo 'closed';

@@ -19,6 +19,18 @@ coolify_app_defaults:
   # name, since PR numbers repeat across repositories.
   preview_name: preview
 
+# An entry with `image` (README, Deploy on release) runs that image instead:
+# these replace the build's defaults. It deploys only when asked (the release
+# workflow, or a run that changes the tag) and has no previews: those stay on
+# an app that builds the branch.
+coolify_image_app_defaults:
+  image_tag: latest
+  auto_deploy: false
+  previews: false
+
+# Root's Docker login, where Coolify's deployments pull from.
+coolify_docker_config: /root/.docker/config.json
+
 # Coolify's placeholder, kept away from Ansible's own templating.
 coolify_pr_placeholder: !unsafe "{{pr_id}}"
 
