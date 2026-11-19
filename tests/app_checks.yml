@@ -1,0 +1,64 @@
+---
+# The checks site.yml runs on coolify_apps before anything changes
+# (roles/coolify_apps/tasks/checks.yml): a setup like production's passes,
+# and each wrong entry below stops the run. Offline: no API call, nothing
+# changed, and group_vars/all/local.yml is not read.
+#
+#   ansible-playbook tests/app_checks.yml
+
+- name: Checks of coolify_apps
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    site: {repo: you/site, project: Site, domains: [example.com], port: 8080}
+    myapp: {repo: you/myapp, name: myapp, project: MyApp, zone: example.dev, preview_name: "", port: 8740}
+    wrong:
+      - {why: a zone that is not routed, apps: [{repo: you/x, project: X, zone: example.org}]}
+      - {why: no project, apps: [{repo: you/x}]}
+      - {why: a repo without owner, apps: [{repo: x, project: X}]}
+      - {why: a domain with no route, apps: [{repo: you/x, project: X, domains: [x.elsewhere.org]}]}
+      - {why: a domain two levels down, apps: [{repo: you/x, project: X, domains: [a.b.example.com]}]}
+      - {why: a quote in data_path, apps: [{repo: you/x, project: X, data_path: "/data'"}]}
+      - {why: a healthcheck_path without /, apps: [{repo: you/x, project: X, healthcheck_path: health}]}
+      - {why: preview_name with capitals, apps: [{repo: you/x, project: X, preview_name: Blog}]}
+      - {why: an app on ci-1 with ci_previews off, apps: [{repo: you/x, name: x, project: X, server: ci-1, network: x}]}
+      - {why: the same app twice, apps: [{repo: you/x, project: X}, {repo: You/x, project: Y}]}
+      - {why: an entry of preview_apps, apps: [], preview_apps: [{name: x, repository: you/x}]}
+  tasks:
+    - name: Read the defaults and a setup shaped like production's
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      loop:
+        - "{{ playbook_dir }}/../group_vars/all/defaults.yml"
+        - "{{ playbook_dir }}/operator.yml"
+
+    - name: Check a setup shaped like production's
+      ansible.builtin.include_role:
+        name: coolify_apps
+        tasks_from: checks
+
+    # main.<zone> is the default domain of an app with `zone`; an explicit
+    # domain under a zone's wildcard, or in production_hostnames, is routed.
+    - name: Check routed domains
+      ansible.builtin.include_role:
+        name: coolify_apps
+        tasks_from: checks
+      vars:
+        coolify_apps:
+          - "{{ site }}"
+          - "{{ myapp }}"
+          - {repo: you/blog, project: Blog, domains: [blog.example.com, www.example.com]}
+          - {repo: you/docs, project: Docs, zone: example.dev, domains: [docs.example.dev]}
+
+    - name: Check that each wrong setup stops the run
+      ansible.builtin.include_tasks: app_checks_wrong.yml
+      loop: "{{ wrong }}"
+      loop_control:
+        loop_var: case
+        label: "{{ case.why }}"
+
+    - name: Report the result
+      ansible.builtin.assert:
+        that: app_checks_passed | default([]) | length == 0
+        fail_msg: "These were let through: {{ app_checks_passed | default([]) }}"
