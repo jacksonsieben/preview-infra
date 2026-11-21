@@ -35,6 +35,8 @@ jobs:
         run: python3 tests/check_mode.py
       - name: Tunnel routes
         run: ansible-playbook tests/tunnel_routes.yml
+      - name: Checks of coolify_apps
+        run: ansible-playbook tests/app_checks.yml
       - name: Coolify environment variables
         run: python3 tests/coolify_env.py
       - name: Coolify build limit

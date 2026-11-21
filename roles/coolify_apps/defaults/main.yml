@@ -15,9 +15,12 @@ coolify_app_defaults:
   # false builds a preview only when asked for in the dashboard (README, Build
   # load), not on every push.
   previews: true
-  # Preview hostname: pr-<n>-<preview_name>.<domain>. Give each app its own
-  # name, since PR numbers repeat across repositories.
+  # Preview hostname: pr-<n>-<preview_name>.<zone>, or pr-<n>.<zone> with
+  # preview_name: "". Give each app on a zone its own name, since PR numbers
+  # repeat across repositories.
   preview_name: preview
+  # `domain`, or one of preview_zones.
+  zone: "{{ domain }}"
 
 # An entry with `image` (README, Deploy on release) runs that image instead:
 # these replace the build's defaults. It deploys only when asked (the release
@@ -28,8 +31,20 @@ coolify_image_app_defaults:
   auto_deploy: false
   previews: false
 
+# The plan (apps_plan.yml, README: Plan the applications): read every
+# application and print what a run would change, sending nothing. The API
+# session is still opened and closed, as in a run.
+coolify_apps_plan: false
+
 # Root's Docker login, where Coolify's deployments pull from.
 coolify_docker_config: /root/.docker/config.json
+
+# coolify_apps without their environment variables: a loop shows its whole
+# item with -v, values included.
+coolify_apps_shown: >-
+  {{ coolify_apps | map('dict2items')
+     | map('rejectattr', 'key', 'in', ['preview_env', 'production_env'])
+     | map('items2dict') | list }}
 
 # Coolify's placeholder, kept away from Ansible's own templating.
 coolify_pr_placeholder: !unsafe "{{pr_id}}"

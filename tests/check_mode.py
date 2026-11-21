@@ -44,7 +44,6 @@ PROBES = {
 SKIPPED_FILES = {
     "roles/coolify_apps/tasks/app.yml",
     "roles/coolify_apps/tasks/env.yml",
-    "roles/coolify_apps/tasks/preview_app.yml",
 }
 
 COMMANDS = {"command", "shell"}

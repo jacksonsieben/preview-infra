@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # Stands in for `docker exec coolify php artisan tinker` in tests/coolify_env.py:
-# answers the session the coolify_apps role opens and closes, and `docker login`,
-# and logs each call (stdin, where the registry token goes, is not logged).
+# answers the session the coolify_apps role opens and closes, `docker login`,
+# and the volumes of an application (kept in FAKE_VOLUMES_FILE), and logs each
+# call (stdin, where the registry token goes, is not logged).
 import json
 import os
+import re
 import sys
 
 command = " ".join(sys.argv[1:])
@@ -17,5 +19,17 @@ elif "createToken" in command:
     env_token = "fake-env-token" if "read:sensitive" in command else None
     was = os.environ.get("FAKE_API_WAS_ENABLED", "1") == "1"
     print(json.dumps({"token": "fake-token", "env_token": env_token, "api_was_enabled": was}))
+elif "persistentStorages()" in command:
+    path = os.environ["FAKE_VOLUMES_FILE"]
+    volumes = json.load(open(path)) if os.path.exists(path) else {}
+    app = re.search(r"where\('uuid', '([^']+)'\)", command).group(1)
+    if "->create(" in command:
+        name = re.search(r"'name' => \$a->uuid \. '([^']*)'", command).group(1)
+        mount = re.search(r"'mount_path' => '([^']*)'", command).group(1)
+        volumes.setdefault(app, []).append({"name": app + name, "mount_path": mount, "host_path": None})
+        json.dump(volumes, open(path, "w"))
+        print("added")
+    else:
+        print(json.dumps(volumes.get(app, [])))
 else:
     print("closed")

@@ -2,13 +2,6 @@
 - name: Preview host
   hosts: preview
   become: true
-  vars:
-    # preview_apps without their environment variables: a loop shows its whole
-    # item with -v, values included.
-    preview_apps_shown: >-
-      {{ preview_apps | map('dict2items')
-         | map('rejectattr', 'key', 'in', ['preview_env', 'production_env'])
-         | map('items2dict') | list }}
   pre_tasks:
     - name: Check the settings
       ansible.builtin.assert:
@@ -22,56 +15,12 @@
         quiet: true
       no_log: true
 
-    # An app on a zone that is neither `domain` nor in preview_zones would get
-    # no route, and none of the Access login of preview_zones.
-    - name: Check the preview apps
-      ansible.builtin.assert:
-        that:
-          - item.name | default('') | length > 0
-          - item.repository | default('') is match('^[^/\\s]+/[^/\\s]+$')
-          - item.zone | default('') in [domain] + preview_zones | map(attribute='zone', default='') | list
-          - item.port | default('') | string is match('^[0-9]+$')
-          - item.healthcheck_path | default('') is match('^/')
-        fail_msg: >-
-          Each entry of preview_apps needs a name, a repository (owner/name), a
-          zone that is `domain` or one of preview_zones, a port and a
-          healthcheck_path starting with /.
-        quiet: true
-      loop: "{{ preview_apps_shown }}"
-      loop_control:
-        label: "{{ item.name | default('?') }}"
-
-    # coolify_apps are changed through Coolify's API on every run; an app set up
-    # by hand from preview_apps would be overwritten with their settings.
-    # An app with `server` is the one Coolify deploys on ci-1 for its PR
-    # previews (README, Previews on ci-1), on a network of its own there.
-    - name: Check the preview apps on ci-1
-      ansible.builtin.assert:
-        that:
-          - ci_previews_enabled | bool
-          - item.server == ci_previews_coolify_server
-          - item.network | default('') in ci_previews_networks
-          - item.zone | lower in ci_previews_zones | map('lower') | list
-        fail_msg: >-
-          {{ item.name }} has server: {{ item.server }}. That needs
-          ci_previews_enabled, server equal to ci_previews_coolify_server
-          ({{ ci_previews_coolify_server }}), a network listed in
-          ci_previews_networks, and its zone in ci_previews_zones (README,
-          Previews on ci-1).
-        quiet: true
-      loop: "{{ preview_apps_shown | selectattr('server', 'defined') | list }}"
-      loop_control:
-        label: "{{ item.name }}"
-
-    - name: Check that no app is in both coolify_apps and preview_apps
-      ansible.builtin.assert:
-        that: >-
-          coolify_apps | map(attribute='repo') | map('lower')
-          | intersect(preview_apps | map(attribute='repository') | map('lower')) | length == 0
-        fail_msg: >-
-          A repository is listed in both coolify_apps and preview_apps. Keep it
-          in one of them (README, Step 4 and More zones and apps).
-        quiet: true
+    # Before anything changes: an app on a zone that is neither `domain` nor
+    # in preview_zones would get no route, and none of the Access login.
+    - name: Check the applications
+      ansible.builtin.include_role:
+        name: coolify_apps
+        tasks_from: checks
   roles:
     - coolify
     - role: tailscale_dashboard
@@ -82,7 +31,7 @@
     - preview_access
     - preview_cleanup
     - role: coolify_apps
-      when: coolify_apps | length > 0 or preview_apps | length > 0
+      when: coolify_apps | length > 0
     # Stops the runners when github_runner_enabled is false.
     - github_runner
   tasks:
@@ -93,37 +42,6 @@
         name: ci_previews
         tasks_from: coolify
       when: ci_previews_enabled | bool
-  post_tasks:
-    # Coolify keeps its applications in its own database; these are the values
-    # to enter in its dashboard (README, More zones and apps).
-    - name: Coolify settings for the preview apps
-      ansible.builtin.debug:
-        msg: "{{ common[:1] + (on_ci if item.server is defined else []) + common[1:] }}"
-      vars:
-        suffix: "{{ ('-' ~ item.preview_name) if item.preview_name | default('') else '' }}"
-        common:
-          - "Resource: Private Repository (with GitHub App), {{ item.repository }}, branch main"
-          - "Build Pack: Dockerfile. Ports Exposes: {{ item.port }}"
-          # The app on ci-1 is never deployed itself, only its PR previews:
-          # its domain only gives Coolify the scheme of the preview URLs, and
-          # ci-1 refuses it (not a PR preview). https on a tailnet-only zone,
-          # where Traefik itself has the certificate; http behind the tunnel.
-          - "Domains: {{ 'https' if item.zone | lower in preview_tailnet_zones else 'http' }}://{{ ('previews' if item.server is defined else 'main') ~ suffix }}.{{ item.zone }}"
-          - "Health check: on, path {{ item.healthcheck_path }}, port {{ item.port }}"
-          - "Persistent storage: {{ ('volume mounted at ' ~ item.data_path) if item.data_path | default('') else 'none' }}"
-          - >-
-            Preview Deployments: {{ 'on' if item.previews | default(true) | bool else 'off (on demand, README: Build load)' }}.
-            Auto Deploy: {{ 'off (set by the playbook)' if item.server is defined else 'on' }}
-          - "Preview URL Template: pr-{% raw %}{{pr_id}}{% endraw %}{{ suffix }}.{{ item.zone }}"
-          - "Environment variables: none by hand; the playbook sets preview_env and production_env"
-        on_ci:
-          - "Server: {{ item.server | default('') }}. Destination: previews-{{ item.network | default('') }}"
-          - >-
-            Resource limits: set by the playbook ({{ item.cpus | default(ci_previews_cpus) }} CPU,
-            {{ item.memory | default(ci_previews_memory) }} of memory, no swap, for each preview)
-      loop: "{{ preview_apps_shown }}"
-      loop_control:
-        label: "{{ item.name }}"
 
 # The remote host's base (firewall, sshd, updates, swap, memory floor, Docker),
 # its GitHub Actions runners and the PR previews it runs for the preview
