@@ -31,12 +31,23 @@ cloudflare_tunnel_coolify_ingress:
     - hostname: "{{ coolify_hostname }}"
       service: http://127.0.0.1:8000
 
+# With an app that runs an image (coolify_deploy_endpoint), coolify.<domain>
+# also serves Coolify's deploy endpoint, for the release workflow (README,
+# Deploy on release): that path only, nothing else of the API. Each call needs
+# a Coolify token with the deploy permission. With `public` the whole dashboard
+# is there already.
+cloudflare_tunnel_deploy_ingress:
+  - hostname: "{{ coolify_hostname }}"
+    path: ^/api/v1/deploy$
+    service: http://127.0.0.1:8000
+
 #
 # A zone whose previews ci-1 serves (cloudflare_ci_zones) keeps only the names
 # listed in production_hostnames here: its wildcard goes to ci-1's tunnel.
 # Names on tailnet-only zones get no route at all (cloudflare_tailnet_names).
 cloudflare_tunnel_ingress: >-
-  {{ cloudflare_tunnel_coolify_ingress[coolify_dashboard]
+  {{ (cloudflare_tunnel_deploy_ingress if coolify_dashboard == 'tailscale' and coolify_deploy_endpoint | bool else [])
+     + cloudflare_tunnel_coolify_ingress[coolify_dashboard]
      + cloudflare_tunnel_production_names | map('community.general.dict_kv', 'hostname')
        | map('combine', {'service': 'http://127.0.0.1:80'}) | list
      + ([] if domain | lower in cloudflare_ci_zones else [

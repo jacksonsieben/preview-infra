@@ -11,6 +11,7 @@ updates and deletes only its own variables, keeps preview and production
 apart, that a second run changes nothing, and that no value or the token that
 reads them shows in the output of `ansible-playbook --diff -v`.
 """
+import base64
 import json
 import os
 import re
@@ -29,8 +30,12 @@ SECRETS = {
     "FAKE_PREVIEW_CODE_2": "sentinel-code-b-7f3a",
     "FAKE_PROD_SECRET": "sentinel-prod-9c1e",
 }
+# Only through stdin of `docker login`: never in the output or a command line.
+REGISTRY_TOKEN = "sentinel-ghcr-token-77"
 SEEDED = {"old": "sentinel-old-value-55", "hand": "sentinel-hand-made-31"}
 COMMENT = "Managed by preview-infra (preview_env/production_env in local.yml); deleted when taken out."
+IMAGE_APP_FIELDS = {"project_uuid", "environment_name", "server_uuid", "docker_registry_image_name",
+                    "docker_registry_image_tag", "ports_exposes", "name", "domains", "instant_deploy"}
 ENV_FIELDS = {"key", "value", "is_preview", "is_literal", "is_multiline", "is_shown_once",
               "is_runtime", "is_buildtime", "comment"}
 
@@ -50,8 +55,8 @@ class FakeCoolify:
         self.apps = []
         self.envs = {}
 
-    def add_app(self, repo, name):
-        app = {"uuid": "app-" + uuid.uuid4().hex[:8], "name": name, "git_repository": repo}
+    def add_app(self, repo, name, **fields):
+        app = {"uuid": "app-" + uuid.uuid4().hex[:8], "name": name, "git_repository": repo, **fields}
         self.apps.append(app)
         self.envs[app["uuid"]] = []
         return app["uuid"]
@@ -94,11 +99,26 @@ class FakeCoolify:
                 return 201, {"uuid": "envr-1"}
             return (200, {"name": parts[2]}) if parts[2] in project["environments"] else (404, {})
         if (method, path) == ("GET", "/applications"):
-            return 200, [{k: a[k] for k in ("uuid", "name", "git_repository")} for a in self.apps]
+            return 200, [{k: a[k] for k in ("uuid", "name", "git_repository", "build_pack") if k in a}
+                         for a in self.apps]
+        if (method, path) == ("POST", "/applications/dockerimage"):
+            # Like Coolify, refuses a field it doesn't know.
+            extra = set(body) - IMAGE_APP_FIELDS
+            if extra:
+                return 422, {"message": "Validation failed.", "errors": {k: "not allowed" for k in extra}}
+            app = {"uuid": "app-" + uuid.uuid4().hex[:8], "name": body["name"], "build_pack": "dockerimage",
+                   "fqdn": body["domains"], "settings": {}, "created_with": body,
+                   **{k: body[k] for k in ("ports_exposes", "docker_registry_image_name",
+                                           "docker_registry_image_tag")}}
+            self.apps.append(app)
+            self.envs[app["uuid"]] = []
+            return 201, {"uuid": app["uuid"], "domains": body["domains"]}
         if (method, path) == ("POST", "/applications/private-github-app"):
             app_uuid = self.add_app(body["git_repository"], body.get("name", body["git_repository"]))
             app = self.apps[-1]
-            app.update({k: body[k] for k in ("ports_exposes", "git_branch", "build_pack", "preview_url_template")})
+            app.update({k: body[k] for k in ("ports_exposes", "git_branch", "build_pack", "preview_url_template",
+                                             "health_check_enabled", "health_check_path", "health_check_port")
+                        if k in body})
             app["fqdn"] = body["domains"]
             app["settings"] = {k: body[k] for k in ("is_auto_deploy_enabled", "is_preview_deployments_enabled",
                                                     "is_pr_deployments_public_enabled")}
@@ -117,6 +137,8 @@ class FakeCoolify:
                 # Like Coolify, keeps these under the application's settings.
                 for key in [k for k in body if k.startswith("is_") and k.endswith("_enabled")]:
                     app.setdefault("settings", {})[key] = body.pop(key)
+                if "domains" in body:
+                    app["fqdn"] = body.pop("domains")
                 app.update(body)
                 return 200, {"uuid": app["uuid"]}
         if parts[2:] == ["start"] and method == "POST":
@@ -189,25 +211,30 @@ class Run:
         self.tmp, self.port, self.count = tmp, port, 0
         self.docker_log = os.path.join(tmp, "docker.log")
 
-    def __call__(self, coolify_apps, preview_apps):
+    def __call__(self, coolify_apps, api_was_enabled=True, **more):
         self.count += 1
         extra = os.path.join(self.tmp, f"case{self.count}.json")
         with open(extra, "w") as f:
             json.dump({"coolify_api": f"http://127.0.0.1:{self.port}/api/v1", "domain": "example.com",
                        "coolify_github_app": "coolify-example",
-                       "coolify_apps": coolify_apps, "preview_apps": preview_apps}, f)
+                       "coolify_apps": coolify_apps, **more}, f)
         open(self.docker_log, "w").close()
-        env = dict(os.environ, **SECRETS, PATH=os.path.join(ROOT, "tests", "bin") + os.pathsep + os.environ["PATH"],
-                   FAKE_DOCKER_LOG=self.docker_log, ANSIBLE_CONFIG=os.path.join(ROOT, "ansible.cfg"),
+        env = dict(os.environ, **SECRETS, FAKE_API_WAS_ENABLED="1" if api_was_enabled else "0", PATH=os.path.join(ROOT, "tests", "bin") + os.pathsep + os.environ["PATH"],
+                   FAKE_DOCKER_LOG=self.docker_log, FAKE_VOLUMES_FILE=os.path.join(self.tmp, "volumes.json"),
+                   ANSIBLE_CONFIG=os.path.join(ROOT, "ansible.cfg"),
                    ANSIBLE_ROLES_PATH=os.path.join(ROOT, "roles"), ANSIBLE_NOCOLOR="1", ANSIBLE_FORCE_COLOR="0")
         proc = subprocess.run(
             ["ansible-playbook", "-i", "localhost,", "tests/coolify_env.yml", "--diff", "-v", "-e", "@" + extra],
             cwd=ROOT, env=env, capture_output=True, text=True)
         out = proc.stdout + proc.stderr
-        leaked = [s for s in list(SECRETS.values()) + list(SEEDED.values()) + [ENV_TOKEN] if s in out]
+        leaked = [s for s in list(SECRETS.values()) + list(SEEDED.values()) + [ENV_TOKEN, REGISTRY_TOKEN]
+                  if s in out]
         check(not leaked, f"run {self.count}: no value or token in the output" + (f" (found {leaked})" if leaked else ""))
         with open(self.docker_log) as f:
-            self.session = f.readline()
+            self.docker = f.read().splitlines()
+        self.session = next((c for c in self.docker if "createToken" in c), "")
+        self.closing = next((c for c in self.docker if "echo 'closed'" in c), "")
+        check(REGISTRY_TOKEN not in "\n".join(self.docker), f"run {self.count}: no registry token on a command line")
         return proc.returncode, out
 
 
@@ -230,20 +257,22 @@ def recap_changed(out):
 def main():
     api = FakeCoolify()
     server = serve(api)
-    myapp = api.add_app("you/myapp", "myapp")
+    # As the app on the preview host stands in Coolify, made by hand.
+    built = {"ports_exposes": "8740", "git_branch": "main", "build_pack": "dockerfile",
+             "health_check_enabled": True, "health_check_path": "/health", "health_check_port": "8740"}
+    myapp = api.add_app("you/myapp", "myapp", fqdn="http://main.example.dev",
+                        preview_url_template="pr-{{pr_id}}.example.dev", **built,
+                        settings={"is_auto_deploy_enabled": True, "is_preview_deployments_enabled": True,
+                                  "is_pr_deployments_public_enabled": False})
     api.add_env(myapp, "HAND_MADE", SEEDED["hand"], False)
     api.add_env(myapp, "HAND_MADE", SEEDED["hand"], True)
     api.add_env(myapp, "LUOTSI_PREVIEW_CODE", SEEDED["old"], True, COMMENT)
     api.add_env(myapp, "OLD_FLAG", SEEDED["old"], True, COMMENT)
     hand_made = json.dumps([e for e in api.envs[myapp] if e["key"] == "HAND_MADE"], sort_keys=True)
 
-    def preview_app(**env):
-        return {"name": "myapp", "repository": "you/myapp", "zone": "example.dev", "port": 8740,
-                "healthcheck_path": "/health", **env}
-
-    # Not in Coolify yet, and sets nothing: skipped.
-    not_yet = {"name": "notyet", "repository": "you/notyet", "zone": "example.dev", "port": 80,
-               "healthcheck_path": "/"}
+    def myapp_entry(**more):
+        return {"repo": "you/myapp", "name": "myapp", "project": "MyApp", "zone": "example.dev",
+                "preview_name": "", "port": 8740, "healthcheck_path": "/health", **more}
 
     def site(**env):
         return {"repo": "you/site", "project": "Site", "domains": ["site.example.com"], "port": 8080, **env}
@@ -254,21 +283,25 @@ def main():
     def hand_made_untouched():
         return json.dumps([e for e in api.envs[myapp] if e["key"] == "HAND_MADE"], sort_keys=True) == hand_made
 
+    def app_writes(before, app_uuid):
+        return [(m, p) for m, p, _ in api.requests[before:] if m != "GET" and p == f"/applications/{app_uuid}"]
+
     with tempfile.TemporaryDirectory() as tmp:
         run = Run(tmp, server.server_address[1])
         lookup = "{{ lookup('env', '%s') }}"
-        full = ([site(preview_env={"SITE_PREVIEW": "1"}, production_env={"SITE_MODE": lookup % "FAKE_PROD_SECRET"})],
-                [preview_app(preview_env={"LUOTSI_PREVIEW": "1",
-                                          "LUOTSI_PREVIEW_CODE": lookup % "FAKE_PREVIEW_CODE"}), not_yet])
+        full = [site(preview_env={"SITE_PREVIEW": "1"}, production_env={"SITE_MODE": lookup % "FAKE_PROD_SECRET"}),
+                myapp_entry(preview_env={"LUOTSI_PREVIEW": "1", "LUOTSI_PREVIEW_CODE": lookup % "FAKE_PREVIEW_CODE"})]
 
         print("# 1. create, update, delete")
-        rc, out = run(*full)
+        before = len(api.requests)
+        rc, out = run(full)
         check(rc == 0, "the run succeeds", out)
         check("read:sensitive" in run.session, "the session mints a token that reads values")
         siteapp = next((a["uuid"] for a in api.apps if a["git_repository"] == "you/site"), None)
         check(siteapp is not None, "you/site is created")
         if siteapp is None:
             return 1
+        check(not app_writes(before, myapp), "myapp, already as its entry says, is not changed")
         prev, prod = scope(myapp, True), scope(myapp, False)
         check(prev.get("LUOTSI_PREVIEW", {}).get("value") == "1", "LUOTSI_PREVIEW is created for previews")
         check(prev.get("LUOTSI_PREVIEW_CODE", {}).get("value") == SECRETS["FAKE_PREVIEW_CODE"],
@@ -295,14 +328,14 @@ def main():
 
         print("# 2. the same again")
         before = len(api.requests)
-        rc, out = run(*full)
+        rc, out = run(full)
         writes = [r for r in api.requests[before:] if r[0] != "GET"]
         check(rc == 0 and not writes, f"nothing is written (writes: {writes})", out)
         check(recap_changed(out) == 0, "and the recap says changed=0", out)
 
         print("# 3. a value changes, variables are taken out")
-        changed = ([site()], [preview_app(preview_env={"LUOTSI_PREVIEW_CODE": lookup % "FAKE_PREVIEW_CODE_2"})])
-        rc, out = run(*changed)
+        changed = [site(), myapp_entry(preview_env={"LUOTSI_PREVIEW_CODE": lookup % "FAKE_PREVIEW_CODE_2"})]
+        rc, out = run(changed)
         check(rc == 0, "the run succeeds", out)
         prev = scope(myapp, True)
         check(prev.get("LUOTSI_PREVIEW_CODE", {}).get("value") == SECRETS["FAKE_PREVIEW_CODE_2"],
@@ -313,51 +346,71 @@ def main():
         check("Updated LUOTSI_PREVIEW_CODE (preview)" in out and "Deleted LUOTSI_PREVIEW (preview)" in out,
               "the output names what changed", out)
         before = len(api.requests)
-        rc, out = run(*changed)
+        rc, out = run(changed)
         check(rc == 0 and not [r for r in api.requests[before:] if r[0] != "GET"], "a second run writes nothing", out)
 
         print("# 4. a key made by hand")
         before = len(api.requests)
-        rc, out = run([site()], [preview_app(production_env={"HAND_MADE": "x"})])
+        rc, out = run([site(), myapp_entry(production_env={"HAND_MADE": "x"})])
         check(rc != 0 and "HAND_MADE (production)" in out and "made by hand" in out,
               "the run stops and names it", out)
         check(not [r for r in api.requests[before:] if r[0] != "GET"] and hand_made_untouched(),
               "and changes nothing")
 
         print("# 5. a key that is not a name")
-        rc, out = run([site()], [preview_app(preview_env={"1BAD": "x"})])
+        rc, out = run([site(), myapp_entry(preview_env={"1BAD": "x"})])
         check(rc != 0 and "1BAD" in out and "not a valid name" in out, "the run stops and names it", out)
 
         print("# 6. no app sets any")
-        rc, out = run([site()], [preview_app(), not_yet])
+        rc, out = run([site(), myapp_entry()])
         check(rc == 0, "the run succeeds", out)
         check("read:sensitive" not in run.session, "the session's token can't read values")
         check(not [e for e in api.envs[myapp] if e["comment"] == COMMENT], "the role's last variable is deleted")
         check(hand_made_untouched(), "HAND_MADE is untouched")
 
-        print("# 7. an app that sets some is not in Coolify")
-        rc, out = run([site()], [dict(not_yet, preview_env={"X": "1"})])
-        check(rc != 0 and "no single application for you/notyet" in out, "the run stops and says so", out)
+        print("# 7. a new app on a zone, with a health check and a volume")
+        notyet = {"repo": "you/notyet", "project": "NotYet", "zone": "example.dev", "port": 80,
+                  "healthcheck_path": "/", "data_path": "/data", "preview_env": {"X": "1"}}
+        rc, out = run([site(), myapp_entry(), notyet])
+        check(rc == 0, "the run succeeds", out)
+        new = next((a for a in api.apps if a["git_repository"] == "you/notyet"), None)
+        check(new is not None, "you/notyet is created")
+        if new is None:
+            return 1
+        made = new["created_with"]
+        check(made["domains"] == "http://main-preview.example.dev"
+              and made["preview_url_template"] == "pr-{{pr_id}}-preview.example.dev",
+              f"on main-preview.example.dev, previews on pr-<n>-preview.example.dev ({made['domains']}, "
+              f"{made['preview_url_template']})")
+        check((made.get("health_check_enabled"), made.get("health_check_path"), made.get("health_check_port"))
+              == (True, "/", "80"), "with its health check")
+        with open(os.path.join(tmp, "volumes.json")) as f:
+            volumes = json.load(f).get(new["uuid"])
+        check([v["mount_path"] for v in volumes] == ["/data"], f"and a volume at /data ({volumes})")
+        check(set(scope(new["uuid"], True)) == {"X"}, "and its variable")
+        new_writes = [(m, p) for m, p, _ in api.writes() if new["uuid"] in p]
+        check(new_writes and new_writes[-1] == ("POST", f"/applications/{new['uuid']}/start"),
+              "deployed at the end")
+        before = len(api.requests)
+        rc, out = run([site(), myapp_entry(), notyet])
+        check(rc == 0 and not [r for r in api.requests[before:] if r[0] != "GET"]
+              and not [c for c in run.docker if "->create(" in c], "a second run writes nothing", out)
 
-        print("# 8. previews on demand, on an app made by hand")
+        print("# 8. previews on demand, on the app of the preview host")
         before = len(api.requests)
-        rc, out = run([site()], [preview_app()])
-        check(rc == 0 and "PATCH" not in [r[0] for r in api.requests[before:] if r[1] == f"/applications/{myapp}"],
-              "without `previews`, Coolify's setting is left alone", out)
-        before = len(api.requests)
-        rc, out = run([site()], [preview_app(previews=False)])
+        rc, out = run([site(), myapp_entry(previews=False)])
         app = next(a for a in api.apps if a["uuid"] == myapp)
         check(rc == 0 and app["settings"]["is_preview_deployments_enabled"] is False,
               "`previews: false` turns automatic previews off", out)
-        check(("POST", f"/applications/{myapp}/start", TOKEN) not in api.requests[before:],
-              "and deploys nothing")
+        check(("POST", f"/applications/{myapp}/start", TOKEN) not in api.requests[before:]
+              and "instant_deploy" not in app, "and deploys nothing")
         before = len(api.requests)
-        rc, out = run([site()], [preview_app(previews=False)])
+        rc, out = run([site(), myapp_entry(previews=False)])
         check(rc == 0 and not [r for r in api.requests[before:] if r[0] != "GET"], "a second run writes nothing", out)
 
-        print("# 9. previews on demand, on an app the role manages")
+        print("# 9. previews on demand, on an app the role created")
         before = len(api.requests)
-        rc, out = run([site(previews=False)], [preview_app()])
+        rc, out = run([site(previews=False), myapp_entry(previews=False)])
         siteapp_now = next(a for a in api.apps if a["git_repository"] == "you/site")
         check(rc == 0 and siteapp_now["settings"]["is_preview_deployments_enabled"] is False,
               "`previews: false` turns automatic previews off", out)
@@ -365,16 +418,16 @@ def main():
               "and deploys nothing")
 
         print("# 10. a second app of the repository, for its previews on ci-1")
-        on_ci = api.add_app("you/myapp", "myapp-previews")
+        on_ci = api.add_app("you/myapp", "myapp-previews", fqdn="http://previews.example.dev",
+                            preview_url_template="pr-{{pr_id}}.example.dev", **built,
+                            settings={"is_auto_deploy_enabled": True})
         ci_app = next(a for a in api.apps if a["uuid"] == on_ci)
-        ci_app.setdefault("settings", {})["is_auto_deploy_enabled"] = True
 
         def ci_entry(**more):
-            return {"name": "myapp-previews", "repository": "you/myapp", "zone": "example.dev", "port": 8740,
-                    "healthcheck_path": "/health", "server": "ci-1", "network": "myapp", **more}
+            return myapp_entry(**{"name": "myapp-previews", "server": "ci-1", "network": "myapp", **more})
 
         before = len(api.requests)
-        rc, out = run([site()], [preview_app(previews=False), ci_entry(previews=True, memory="768m")])
+        rc, out = run([site(), myapp_entry(previews=False), ci_entry(memory="768m")])
         check(rc == 0 and ci_app["settings"]["is_auto_deploy_enabled"] is False
               and ci_app["settings"]["is_preview_deployments_enabled"] is True,
               "Auto Deploy off and previews on, on ci-1", out)
@@ -384,14 +437,104 @@ def main():
         app = next(a for a in api.apps if a["uuid"] == myapp)
         check(app["settings"]["is_preview_deployments_enabled"] is False and "limits_memory" not in app,
               "the app on the preview host keeps its previews off and gets no limits")
-        check(not [r for r in api.requests[before:] if r[0] == "POST" and r[1].endswith("/start")],
-              "and nothing is deployed")
+        check(not [r for r in api.requests[before:] if r[0] == "POST" and r[1].endswith("/start")]
+              and "instant_deploy" not in ci_app, "and nothing is deployed")
         before = len(api.requests)
-        rc, out = run([site()], [preview_app(previews=False), ci_entry(previews=True, memory="768m")])
+        rc, out = run([site(), myapp_entry(previews=False), ci_entry(memory="768m")])
         check(rc == 0 and not [r for r in api.requests[before:] if r[0] != "GET"], "a second run writes nothing", out)
-        rc, out = run([site()], [preview_app(previews=False), ci_entry(cpus="0.5")])
+        rc, out = run([site(), myapp_entry(previews=False), ci_entry(cpus="0.5")])
         check(rc == 0 and (ci_app["limits_cpus"], ci_app["limits_memory"]) == ("0.5", "1g"),
               "the defaults of ci_previews_cpus and _memory, and a limit of its own", out)
+        before = len(api.requests)
+        rc, out = run([site(), myapp_entry(previews=False), ci_entry(name="myapp-other")])
+        check(rc != 0 and "Create it by hand" in out, "an app on ci-1 that isn't in Coolify stops the run", out)
+        check(len(api.apps) == 4 and not [r for r in api.requests[before:] if r[0] == "POST"],
+              "and is not created")
+
+        print("# 11. an app that runs a published image")
+        docker_config = os.path.join(tmp, "docker-config.json")
+        registry = {"coolify_registry_username": "you", "coolify_registry_token": REGISTRY_TOKEN,
+                    "coolify_docker_config": docker_config}
+
+        def image_app(**more):
+            return {"repo": "you/app", "name": "app", "project": "App", "image": "ghcr.io/you/app",
+                    "domains": ["app.example.com"], "port": 8740, **more}
+
+        def the_image_app():
+            return next((a for a in api.apps if a.get("name") == "app"), None)
+
+        before = len(api.requests)
+        rc, out = run([site(), image_app()], api_was_enabled=False, **registry)
+        check(rc == 0, "the run succeeds", out)
+        app = the_image_app()
+        check(app is not None and app["created_with"]["instant_deploy"] is False
+              and (app["docker_registry_image_name"], app["docker_registry_image_tag"]) == ("ghcr.io/you/app", "latest"),
+              "it is created from ghcr.io/you/app:latest, without deploying", out)
+        if app is None:
+            return 1
+        check(app["settings"].get("is_auto_deploy_enabled") is False
+              and app["settings"].get("is_preview_deployments_enabled") is False,
+              "with auto deploy and previews off")
+        app_writes = [(m, p) for m, p, _ in api.requests[before:] if m != "GET" and app["uuid"] in p]
+        check(app_writes and app_writes[-1] == ("POST", f"/applications/{app['uuid']}/start")
+              and app_writes.count(("POST", f"/applications/{app['uuid']}/start")) == 1,
+              f"and deployed once, at the end ({app_writes})")
+        check(f"https://coolify.example.com/api/v1/deploy?uuid={app['uuid']}&force=false" in out,
+              "the run shows its deploy URL", out)
+        check("login ghcr.io --username you --password-stdin" in run.docker,
+              "root logs in to the registry, the token on stdin")
+        check("is_api_enabled = false" not in run.closing, "the API stays on for the deploy endpoint")
+
+        print("# 12. the same again, logged in already")
+        with open(docker_config, "w") as f:
+            json.dump({"auths": {"ghcr.io": {"auth": base64.b64encode(f"you:{REGISTRY_TOKEN}".encode()).decode()}}}, f)
+        before = len(api.requests)
+        rc, out = run([site(), image_app()], api_was_enabled=False, **registry)
+        writes = [r for r in api.requests[before:] if r[0] != "GET"]
+        check(rc == 0 and not writes, f"nothing is written (writes: {writes})", out)
+        check(not [c for c in run.docker if c.startswith("login")], "and no new login")
+        check(recap_changed(out) == 0, "and the recap says changed=0", out)
+
+        print("# 13. a rollback: the tag pinned to a version")
+        before = len(api.requests)
+        rc, out = run([site(), image_app(image_tag="0.1.1")], **registry)
+        patches = [r for r in api.requests[before:] if r[:2] == ("PATCH", f"/applications/{app['uuid']}")]
+        check(rc == 0 and app["docker_registry_image_tag"] == "0.1.1", "the app gets the tag 0.1.1", out)
+        check(app.get("instant_deploy") is True and patches, "and is redeployed with it")
+
+        print("# 14. without an image, the API goes back off")
+        rc, out = run([site()], api_was_enabled=False)
+        check(rc == 0 and "is_api_enabled = false" in run.closing, "the run turns the API off again", out)
+
+        print("# 15. wrong image entries")
+        before = len(api.requests)
+        rc, out = run([site(), image_app(previews=True)])
+        check(rc != 0 and "neither auto_deploy" in out, "previews on an image app stop the run", out)
+        rc, out = run([site(), image_app(name="myapp")])
+        check(rc != 0 and "can't be" in out and "turned into an image app" in out,
+              "the name of an app that builds a branch stops the run", out)
+        rc, out = run([site(), image_app(image="ghcr.io/you/app:1.0")])
+        check(rc != 0 and "image without a" in out, "a tag in `image` stops the run", out)
+        check(not [r for r in api.requests[before:] if r[0] != "GET"], "and nothing is written")
+
+        print("# 16. the plan (apps_plan.yml)")
+        planned = [site(), myapp_entry(preview_name="blog", data_path="/var/lib/myapp", preview_env={"NEW": "1"}),
+                   {"repo": "you/planned", "project": "Planned", "zone": "example.dev"},
+                   image_app(image_tag="0.2.0")]
+        before, apps_before = len(api.requests), json.dumps(api.apps, sort_keys=True)
+        rc, out = run(planned, coolify_apps_plan=True, **registry)
+        writes = [r for r in api.requests[before:] if r[0] != "GET"]
+        check(rc == 0 and not writes and json.dumps(api.apps, sort_keys=True) == apps_before,
+              f"nothing is written (writes: {writes})", out)
+        check(not [c for c in run.docker if c.startswith("login") or "->create(" in c],
+              "no registry login and no volume")
+        check("you/site: no change" in out, "an app as its entry says: no change", out)
+        check("myapp: a run sends PATCH" in out and "pr-{{pr_id}}-blog.example.dev" in out
+              and "now" in out, "a changed app: the PATCH a run sends, and what it changes from", out)
+        check("a run adds a volume at /var/lib/myapp" in out, "the volume a run adds", out)
+        check("A run creates NEW (preview)" in out, "the variable a run creates, by name", out)
+        check("you/planned: not in Coolify; a run creates it" in out, "an app a run creates", out)
+        check("app: a run sends PATCH" in out and "0.2.0" in out, "the tag a run deploys", out)
 
     server.shutdown()
     print(f"\n{len(FAILED)} failed" if FAILED else "\nall passed")

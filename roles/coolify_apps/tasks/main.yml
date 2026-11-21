@@ -2,21 +2,64 @@
 # Applications declared in coolify_apps, created or corrected through Coolify's
 # REST API. The GitHub App itself can't be: GitHub only creates apps from a
 # browser (README, Step 4), so this role finds it by name and stops if it's missing.
-# The environment variables of these and of preview_apps are set here too
-# (tasks/env.yml).
+# Their environment variables are set here too (tasks/env.yml).
+#
+# With coolify_apps_plan (apps_plan.yml, README: Plan the applications) the
+# session is opened and every application read, but nothing is written: each
+# app's line says what a run would send.
 #
 # The API is off by default and needs a token. Each run enables it if needed,
 # mints a short-lived token for the root user (read, write, deploy; no access
 # to sensitive values), and in the end deletes the token and puts the API back
-# the way it was. When an app sets environment variables, a second token may
+# the way it was, unless an app runs an image: then the API stays on for the
+# release workflow's deploy call (coolify_deploy_endpoint). When an app sets environment variables, a second token may
 # also read their values, to compare them; only the no_log tasks of env.yml
 # use it.
 
 - name: Check whether any app sets environment variables
   ansible.builtin.set_fact:
     coolify_env_declared: >-
-      {{ (coolify_apps + preview_apps) | map(attribute='preview_env', default={}) | select | list | length > 0
-         or (coolify_apps + preview_apps) | map(attribute='production_env', default={}) | select | list | length > 0 }}
+      {{ coolify_apps | map(attribute='preview_env', default={}) | select | list | length > 0
+         or coolify_apps | map(attribute='production_env', default={}) | select | list | length > 0 }}
+
+# A private image (an entry with `image`) is pulled by Coolify with root's
+# Docker login on this host. The token is compared with the login already
+# there, so a run logs in again only when it changed.
+- name: Check the registry login settings
+  ansible.builtin.assert:
+    that: coolify_registry_username | length > 0
+    fail_msg: coolify_registry_token is set, but coolify_registry_username is empty.
+    quiet: true
+  when: coolify_registry_token | length > 0
+
+- name: Read root's registry logins
+  ansible.builtin.slurp:
+    src: "{{ coolify_docker_config }}"
+  register: coolify_docker_config_raw
+  failed_when: false
+  no_log: true
+  when: coolify_registry_token | length > 0
+
+- name: "Log in to {{ coolify_registry }}"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - login
+      - "{{ coolify_registry }}"
+      - --username
+      - "{{ coolify_registry_username }}"
+      - --password-stdin
+    stdin: "{{ coolify_registry_token }}"
+  changed_when: true
+  no_log: true
+  when:
+    - coolify_registry_token | length > 0
+    - not ansible_check_mode
+    - not (coolify_apps_plan | bool)
+    - >-
+      ((coolify_docker_config_raw.content | default('e30=') | b64decode | from_json).auths | default({}))
+      .get(coolify_registry, {}).auth | default('')
+      != (coolify_registry_username ~ ':' ~ coolify_registry_token) | b64encode
 
 # Opening the session mints a token (and may turn the API on), so check mode
 # leaves it, and everything that needs it, out.
@@ -25,7 +68,8 @@
     msg: >-
       Check mode: Coolify's applications and their environment variables are
       not compared, because reading them through the API takes a token that
-      only a real run creates.
+      only a real run creates. ansible-playbook apps_plan.yml reads them and
+      prints what a run would change, without changing them.
   when: ansible_check_mode
 
 - name: Open a Coolify API session
@@ -62,9 +106,7 @@
 - name: Configure the applications
   when: not ansible_check_mode
   block:
-    # Only coolify_apps are created here; preview_apps exist already.
     - name: Check the server and the GitHub App
-      when: coolify_apps | length > 0
       block:
         - name: Look up the Coolify server
           ansible.builtin.uri:
@@ -94,7 +136,9 @@
             headers: *coolify_headers
             status_code: [200, 201]
           changed_when: true
-          when: not (coolify_server.settings.is_reachable | default(false) | bool)
+          when:
+            - not (coolify_server.settings.is_reachable | default(false) | bool)
+            - not (coolify_apps_plan | bool)
 
         - name: Wait for the server to be reachable
           ansible.builtin.uri:
@@ -104,7 +148,9 @@
           until: coolify_server_check.json.settings.is_reachable | default(false) | bool
           retries: 12
           delay: 5
-          when: not (coolify_server.settings.is_reachable | default(false) | bool)
+          when:
+            - not (coolify_server.settings.is_reachable | default(false) | bool)
+            - not (coolify_apps_plan | bool)
 
         - name: Look up the GitHub App
           ansible.builtin.uri:
@@ -145,14 +191,7 @@
       loop: "{{ coolify_apps }}"
       loop_control:
         loop_var: coolify_app_item
-        label: "{{ coolify_app_item.repo }}"
-
-    - name: Set the environment variables of each preview app
-      ansible.builtin.include_tasks: preview_app.yml
-      loop: "{{ preview_apps }}"
-      loop_control:
-        loop_var: coolify_app_item
-        label: "{{ coolify_app_item.repository }}"
+        label: "{{ coolify_app_item.name | default(coolify_app_item.repo) }}"
 
   always:
     - name: Close the Coolify API session
@@ -167,7 +206,7 @@
           - --execute
           - >-
             App\Models\User::find(0)->tokens()->where('name', 'preview-infra')->delete();
-            {% if not (coolify_api_session.api_was_enabled | default(true)) %}
+            {% if not (coolify_api_session.api_was_enabled | default(true)) and not (coolify_deploy_endpoint | bool) %}
             $s = App\Models\InstanceSettings::get(); $s->is_api_enabled = false; $s->save();
             {% endif %}
             echo 'closed';

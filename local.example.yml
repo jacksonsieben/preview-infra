@@ -38,6 +38,33 @@ coolify_apps:
     #   SITE_PREVIEW: "1"
     #   SITE_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'Site preview code', field='credential', vault='Ansible') }}"
     # production_env: {}   # only in production, same format
+  # An app that runs its published image, deployed by its release workflow;
+  # its PR previews stay on an entry that builds the branch (README, Deploy on
+  # release).
+  # - repo: you/app
+  #   name: app
+  #   project: App
+  #   image: ghcr.io/you/app
+  #   image_tag: latest
+  #   domains: ["app.{{ domain }}"]
+  #   port: 8080
+  # An app on a zone of preview_zones below (README, More zones and apps):
+  # production at main.example.dev, previews at pr-<n>.example.dev.
+  # - repo: you/myapp
+  #   name: myapp
+  #   project: MyApp
+  #   zone: example.dev
+  #   preview_name: ""
+  #   port: 8740
+  #   healthcheck_path: /health
+  #   data_path: /data
+  #   preview_env:
+  #     MYAPP_PREVIEW: "1"
+  #     MYAPP_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'MyApp preview code', field='credential', vault='Ansible') }}"
+
+# The registry login for a private image: a token with only read:packages.
+# coolify_registry_username: you
+# coolify_registry_token: "{{ lookup('community.general.onepassword', 'GHCR read', field='credential', vault='Ansible') }}"
 
 # Builds at once on this host (default 1). To build one app's previews only on
 # demand, add `previews: false` to its entry (README, Build load).
@@ -60,19 +87,6 @@ coolify_apps:
 # preview_zones:
 #   - zone: example.dev
 #     tailnet: true
-
-# Apps created by hand in Coolify, for previews on other zones; the playbook
-# prints what to enter. A repository is in coolify_apps or here, not both.
-# preview_apps:
-#   - name: myapp
-#     repository: you/myapp
-#     zone: example.dev
-#     port: 8080
-#     healthcheck_path: /health
-#     data_path: /data
-#     preview_env:
-#       MYAPP_PREVIEW: "1"
-#       MYAPP_PREVIEW_CODE: "{{ lookup('community.general.onepassword', 'MyApp preview code', field='credential', vault='Ansible') }}"
 
 # GitHub Actions runner for your private repositories (README, GitHub Actions
 # runner). The token goes in GITHUB_RUNNER_TOKEN or in 1Password.
@@ -126,21 +140,16 @@ coolify_apps:
 # On a tailnet-only zone, ci-1's Traefik needs its own Cloudflare token for
 # DNS-01, which you put on ci-1 yourself (README, Tailnet-only zones):
 # ci_previews_dns_token_file: /etc/preview-infra/cloudflare-dns-token
-# preview_apps:
-#   - name: myapp                  # production, here: no previews
-#     repository: you/myapp
+# In coolify_apps above: `previews: false` on the app here, and a second
+# entry for the same repository, its app on ci-1 made by hand first:
+#   - repo: you/myapp
+#     name: myapp-previews
+#     project: MyApp
 #     zone: example.dev
-#     port: 8740
-#     healthcheck_path: /health
-#     data_path: /data
-#     previews: false
-#   - name: myapp-previews         # the same repository, on ci-1, for its PRs
-#     repository: you/myapp
-#     zone: example.dev
+#     preview_name: ""
 #     port: 8740
 #     healthcheck_path: /health
 #     data_path: /data
 #     server: ci-1                 # ci_previews_coolify_server
 #     network: myapp               # one of ci_previews_networks
-#     previews: true
 #     memory: 768m                 # optional, else ci_previews_memory

@@ -1,0 +1,19 @@
+---
+# One wrong setup of tests/app_checks.yml: the checks must fail on it.
+- name: "Check {{ case.why }}"
+  block:
+    - name: "Run the checks on {{ case.why }}"
+      ansible.builtin.include_role:
+        name: coolify_apps
+        tasks_from: checks
+      vars:
+        coolify_apps: "{{ [site] + case.apps }}"
+        preview_apps: "{{ case.preview_apps | default([]) }}"
+
+    - name: "Remember that {{ case.why }} passed"
+      ansible.builtin.set_fact:
+        app_checks_passed: "{{ app_checks_passed | default([]) + [case.why] }}"
+  rescue:
+    - name: "Report that {{ case.why }} stops the run"
+      ansible.builtin.debug:
+        msg: "ok: {{ case.why }} stops the run"

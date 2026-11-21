@@ -1,0 +1,115 @@
+---
+# The settings of coolify_apps, checked before anything changes: site.yml runs
+# these first, in check mode too, and so does apps_plan.yml. Nothing here
+# reads Coolify.
+
+- name: Check that preview_apps is gone
+  ansible.builtin.assert:
+    that: preview_apps | default([]) | length == 0
+    fail_msg: >-
+      preview_apps is no longer read: every app is an entry of coolify_apps.
+      Move each one there (repository becomes repo, and it needs the project
+      its application is in), run ansible-playbook apps_plan.yml to see what a
+      run would change, then run the playbook (README, More zones and apps).
+    quiet: true
+
+# Without the environment variables: a loop shows its whole item with -v,
+# values included.
+- name: Check the applications
+  ansible.builtin.assert:
+    that:
+      - item.repo | default('') is match('^[^/\s]+/[^/\s]+$')
+      - item.project | default('') | length > 0
+      - (item.zone | default(domain) | lower) in [domain | lower] + preview_zones | map(attribute='zone', default='') | map('lower') | list
+      - item.port | default(8080) | string is match('^[0-9]+$')
+      - item.preview_name | default('preview') is match('^([a-z0-9]+(-[a-z0-9]+)*)?$')
+      - item.healthcheck_path | default('/') is match('^/[A-Za-z0-9._~/?=&%-]*$')
+      - item.data_path | default('/') is match('^/[A-Za-z0-9._/-]*$')
+      - item.image is not defined or item.server is not defined
+    fail_msg: >-
+      Each entry of coolify_apps needs a repo (owner/name) and a project. Its
+      zone is `domain` or one of preview_zones, its port a number, its
+      preview_name lowercase letters, digits and - (or ""), and
+      healthcheck_path and data_path are paths starting with /. An entry with `image` has
+      no server.
+    quiet: true
+  loop: "{{ coolify_apps_shown }}"
+  loop_control:
+    label: "{{ item.name | default(item.repo | default('?')) }}"
+
+# An app with `server` is the one Coolify deploys on ci-1 for its PR previews
+# (README, Previews on ci-1), on a network of its own there.
+- name: Check the applications on ci-1
+  ansible.builtin.assert:
+    that:
+      - ci_previews_enabled | bool
+      - item.server == ci_previews_coolify_server
+      - item.name | default('') | length > 0
+      - item.network | default('') in ci_previews_networks
+      - item.zone | default(domain) | lower in ci_previews_zones | map('lower') | list
+    fail_msg: >-
+      {{ item.repo }} has server: {{ item.server }}. That needs
+      ci_previews_enabled, server equal to ci_previews_coolify_server
+      ({{ ci_previews_coolify_server }}), a name, a network listed in
+      ci_previews_networks, and its zone in ci_previews_zones (README,
+      Previews on ci-1).
+    quiet: true
+  loop: "{{ coolify_apps_shown | selectattr('server', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name | default(item.repo) }}"
+
+# A domain the tunnel doesn't route would never reach the app: it must be in
+# production_hostnames, or one label under a wildcard this host serves
+# (preview_wildcard, or a zone of preview_zones). A zone whose previews moved
+# to ci-1 routes its wildcard there instead. The app on ci-1 is skipped: its
+# domain only gives Coolify the scheme of the preview URLs.
+- name: Check that every domain of the applications is routed here
+  ansible.builtin.assert:
+    that: coolify_unrouted | length == 0
+    fail_msg: >-
+      {{ item.name | default(item.repo) }}: {{ coolify_unrouted | join(', ') }}
+      has no route to this host. Add it to production_hostnames, or use a
+      first-level name of `domain` or of a zone in preview_zones
+      ({{ coolify_wildcards | join(', ') }}).
+    quiet: true
+  vars:
+    coolify_ci_zones: "{{ ci_previews_zones | map('lower') | list if ci_previews_enabled | bool else [] }}"
+    coolify_wildcards: >-
+      {%- set out = [] -%}
+      {%- if domain | lower not in coolify_ci_zones -%}
+        {%- set _ = out.append(preview_wildcard | lower) -%}
+      {%- endif -%}
+      {%- for z in preview_zones if (z.zone | default('') | lower) not in coolify_ci_zones -%}
+        {%- set _ = out.append((z.wildcard | default('*.' ~ z.zone)) | lower) -%}
+      {%- endfor -%}
+      {{ out }}
+    coolify_unrouted: >-
+      {%- set hosts = production_hostnames | map('lower') | list -%}
+      {%- set out = [] -%}
+      {%- set preview_name = item.preview_name | default('preview') -%}
+      {%- set suffix = ('-' ~ preview_name) if preview_name else '' -%}
+      {%- set names = item.domains if item.domains is defined
+                      else (['main' ~ suffix ~ '.' ~ item.zone] if item.zone is defined else []) -%}
+      {%- for name in names -%}
+        {%- set name = name | lower -%}
+        {%- set parent = name.split('.', 1)[1] if '.' in name else '' -%}
+        {%- if name not in hosts and ('*.' ~ parent) not in coolify_wildcards -%}
+          {%- set _ = out.append(name) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  loop: "{{ coolify_apps_shown | rejectattr('server', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name | default(item.repo) }}"
+
+- name: Check that no application is listed twice
+  ansible.builtin.assert:
+    that: coolify_app_keys | length == coolify_app_keys | unique | length
+    fail_msg: >-
+      Two entries of coolify_apps have the same repo and name: give each its
+      own `name` ({{ coolify_app_keys | sort }}).
+    quiet: true
+  vars:
+    coolify_app_keys: >-
+      {{ coolify_apps_shown | map(attribute='repo') | map('lower')
+         | zip(coolify_apps_shown | map(attribute='name', default='')) | map('join', ' ') | list }}
