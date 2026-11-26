@@ -200,7 +200,7 @@
       ansible.builtin.assert:
         that:
           - ci_2_play.hosts == 'ci_2'
-          - role_names == ['ci_host', 'github_runner']
+          - ci_2_roles == ['ci_host', 'github_runner']
           - runner.github_runner_instances == 1
           - runner.github_runners == []
           - runner.github_runner_scope == 'repo'
@@ -223,7 +223,7 @@
         plays: "{{ lookup('ansible.builtin.file', '../site.yml') | from_yaml }}"
         ci_play: "{{ plays | selectattr('hosts', 'eq', 'ci') | first }}"
         ci_2_play: "{{ plays | selectattr('hosts', 'eq', 'ci_2') | first }}"
-        role_names: "{{ ci_2_play.roles | map(attribute='role') | list }}"
+        ci_2_roles: "{{ ci_2_play.roles | map(attribute='role') | list }}"
         runner: "{{ (ci_2_play.roles | selectattr('role', 'eq', 'github_runner') | first).vars }}"
         ci_host: "{{ (ci_2_play.roles | selectattr('role', 'eq', 'ci_host') | first).vars }}"
 
