@@ -218,7 +218,7 @@
           - ci_2_play.vars.ci_2_job_bridge_prefix is match('^[a-z][a-z0-9-]{0,6}$')
           # ci-1's play is left as it was: ci-2 is not in its group.
           - ci_play.hosts == 'ci'
-        fail_msg: "{{ ci_2_play }}"
+        fail_msg: "{{ ci_2_play | to_json }}"
       vars:
         plays: "{{ lookup('ansible.builtin.file', '../site.yml') | from_yaml }}"
         ci_play: "{{ plays | selectattr('hosts', 'eq', 'ci') | first }}"
@@ -232,7 +232,7 @@
         that:
           - "'ci-2' in inventory.all.children.ci_2.hosts"
           - "'ci-2' not in (inventory.all.children.ci.hosts | default({}))"
-        fail_msg: "{{ inventory }}"
+        fail_msg: "{{ inventory | to_json }}"
       vars:
         inventory: "{{ lookup('ansible.builtin.file', '../inventory/hosts.yml') | from_yaml }}"
 
