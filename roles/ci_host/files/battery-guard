@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Stop the GitHub Actions runners when the battery is too hot or too low.
+
+Run once a minute by battery-guard.timer. Reads capacity (percent) and temp
+(tenths of a degree Celsius) in BATTERY_GUARD_DIR, a directory of
+/sys/class/power_supply, and only reads it: it never writes there, and leaves
+any battery or charging service alone.
+
+Above BATTERY_GUARD_MAX_TEMP degrees, below BATTERY_GUARD_MIN_CAPACITY
+percent, or when the battery cannot be read, it stops the runners
+(BATTERY_GUARD_STOP, `systemctl stop github-runner@*.service`) and posts to
+BATTERY_GUARD_NTFY_URL (an ntfy topic URL; empty logs only), once per
+episode: BATTERY_GUARD_STATE marks one in progress, and the next reading
+within the limits ends it. The runners stay stopped until they are started
+again by hand or by the playbook.
+"""
+import os
+import shlex
+import socket
+import subprocess
+import sys
+import urllib.request
+
+
+def read_number(path):
+    with open(path) as f:
+        return int(f.read().strip())
+
+
+def reading(directory):
+    """(capacity in %, temperature in °C or None), or an error message."""
+    try:
+        capacity = read_number(os.path.join(directory, "capacity"))
+    except (OSError, ValueError) as e:
+        return None, None, f"cannot read {directory}/capacity ({e.__class__.__name__})"
+    try:
+        temp = read_number(os.path.join(directory, "temp")) / 10
+    except FileNotFoundError:
+        temp = None
+    except (OSError, ValueError) as e:
+        return capacity, None, f"cannot read {directory}/temp ({e.__class__.__name__})"
+    return capacity, temp, None
+
+
+def problems(capacity, temp, error, max_temp, min_capacity):
+    """Why the runners must stop: an empty list when they may run."""
+    if error:
+        return [error]
+    found = []
+    if temp is not None and temp > max_temp:
+        found.append(f"battery at {temp:g} °C, above {max_temp:g} °C")
+    if capacity < min_capacity:
+        found.append(f"battery at {capacity}%, below {min_capacity:g}%")
+    return found
+
+
+def notify(url, title, message, timeout=10):
+    """Posts to an ntfy topic URL. Returns whether it was accepted."""
+    request = urllib.request.Request(
+        url, data=message.encode(), method="POST",
+        headers={"Title": title, "Priority": "high", "Tags": "warning"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    # The URL holds the secret topic: log the kind of error only.
+    except (OSError, ValueError) as e:
+        log(f"ntfy: {e.__class__.__name__}")
+        return False
+
+
+def log(message):
+    print(message, flush=True)
+
+
+def settings(env):
+    return {
+        "dir": env.get("BATTERY_GUARD_DIR", ""),
+        "max_temp": float(env.get("BATTERY_GUARD_MAX_TEMP", "42")),
+        "min_capacity": float(env.get("BATTERY_GUARD_MIN_CAPACITY", "25")),
+        "ntfy_url": env.get("BATTERY_GUARD_NTFY_URL", ""),
+        "host": env.get("BATTERY_GUARD_HOST", "") or socket.gethostname(),
+        "state": env.get("BATTERY_GUARD_STATE", "/run/battery-guard/alerted"),
+        "stop": shlex.split(env.get("BATTERY_GUARD_STOP",
+                                    "systemctl stop github-runner@*.service")),
+    }
+
+
+def check(conf, send=notify):
+    """One reading. Returns the reasons the runners were stopped, if any."""
+    capacity, temp, error = reading(conf["dir"])
+    found = problems(capacity, temp, error, conf["max_temp"], conf["min_capacity"])
+    if not found:
+        if os.path.exists(conf["state"]):
+            os.remove(conf["state"])
+            log(f"battery back within limits ({capacity}%, {temp} °C): "
+                "start the runners again when you want them")
+        return []
+    why = "; ".join(found)
+    stopped = subprocess.run(conf["stop"], check=False).returncode == 0
+    log(f"{why}: runners {'stopped' if stopped else 'NOT stopped'}")
+    if not os.path.exists(conf["state"]):
+        ok = True
+        if conf["ntfy_url"]:
+            ok = send(conf["ntfy_url"],
+                      f"{conf['host']}: runners stopped, battery",
+                      f"{why}. The GitHub Actions runners on {conf['host']} "
+                      f"{'are stopped' if stopped else 'could NOT be stopped'}"
+                      ". They stay stopped until started again (systemctl "
+                      "start or the playbook).")
+        if ok:
+            os.makedirs(os.path.dirname(conf["state"]) or ".", exist_ok=True)
+            with open(conf["state"], "w") as f:
+                f.write(why + "\n")
+    return found
+
+
+def main():
+    conf = settings(os.environ)
+    if not conf["dir"]:
+        log("BATTERY_GUARD_DIR is not set")
+        return 2
+    check(conf)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

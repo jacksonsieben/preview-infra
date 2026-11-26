@@ -1,5 +1,6 @@
 # Managed by Ansible (preview-infra). Local edits are overwritten.
 #
+{% if ci_host_ssh_tailnet_only | bool %}
 # Keys only, no root, and only from tailnet addresses. A Match block at the
 # end of sshd_config can still let a given network in (Coolify's, for one).
 PasswordAuthentication no
@@ -8,3 +9,9 @@ PermitRootLogin no
 PubkeyAuthentication yes
 AllowUsers{% for cidr in ci_host_tailnet_cidrs %} *@{{ cidr }}{% endfor %}
 
+{% else %}
+# Keys only. The firewall chooses who reaches port 22 (README, Second CI
+# host (ci-2)).
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+{% endif %}

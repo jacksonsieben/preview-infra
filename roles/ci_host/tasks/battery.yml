@@ -1,0 +1,58 @@
+---
+# Battery guard (files/battery-guard): every ci_host_battery_interval seconds
+# it reads the battery's capacity and temperature, and stops the runners above
+# ci_host_battery_max_temp °C or below ci_host_battery_min_capacity %, with a
+# warning to the ntfy topic memory-floor uses. It never writes to
+# /sys/class/power_supply, and no battery or charging service is touched.
+
+- name: Check the battery
+  ansible.builtin.stat:
+    path: /sys/class/power_supply/{{ ci_host_battery }}/capacity
+    get_checksum: false
+  register: ci_host_battery_capacity
+
+- name: Require the battery
+  ansible.builtin.assert:
+    that:
+      - ci_host_battery is match('^[A-Za-z0-9._-]+$')
+      - ci_host_battery_capacity.stat.exists
+    fail_msg: >-
+      No /sys/class/power_supply/{{ ci_host_battery }}/capacity on
+      {{ inventory_hostname }}: set ci_2_battery to the battery's name there
+      (ls /sys/class/power_supply), or to "" on a host without one.
+    quiet: true
+
+- name: Install battery-guard
+  ansible.builtin.copy:
+    src: battery-guard
+    dest: /usr/local/bin/battery-guard
+    mode: "0755"
+
+# The ntfy topic is the only secret: whoever knows it can read and post.
+- name: Write battery-guard's ntfy topic
+  ansible.builtin.template:
+    src: battery-guard.env.j2
+    dest: /etc/battery-guard.env
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Install the battery-guard service and timer
+  ansible.builtin.template:
+    src: "battery-guard.{{ item }}.j2"
+    dest: /etc/systemd/system/battery-guard.{{ item }}
+    mode: "0644"
+  loop: [service, timer]
+  notify: Reload systemd
+
+- name: Apply systemd changes before starting battery-guard
+  ansible.builtin.meta: flush_handlers
+
+- name: Start the battery-guard timer
+  ansible.builtin.systemd_service:
+    name: battery-guard.timer
+    enabled: true
+    state: started
+  # A check run on a new host has not written the unit yet: reported as
+  # ignored. A real run fails as before.
+  ignore_errors: "{{ ansible_check_mode }}"

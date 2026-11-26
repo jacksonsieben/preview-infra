@@ -1,0 +1,11 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+[Unit]
+Description=Check the battery every {{ ci_host_battery_interval }} seconds
+
+[Timer]
+OnBootSec={{ ci_host_battery_interval }}
+OnUnitActiveSec={{ ci_host_battery_interval }}
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

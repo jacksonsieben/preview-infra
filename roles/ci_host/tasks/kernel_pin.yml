@@ -1,0 +1,72 @@
+---
+# The running kernel's package is pinned to its installed version in
+# /etc/apk/world (name=version), so no `apk upgrade` replaces it. The kernel,
+# /boot and os-release themselves are never touched, and nothing is upgraded:
+# this host gets no automatic updates.
+
+# read-only: apk info --who-owns only reads apk's database.
+- name: Find the running kernel's package
+  ansible.builtin.command:
+    argv: [apk, info, --who-owns, "/lib/modules/{{ ansible_facts.kernel }}"]
+  register: ci_host_kernel_owner
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  when: not ci_host_kernel_package
+
+# read-only: apk list only reads apk's database.
+- name: Read the kernel package's installed version
+  ansible.builtin.command:
+    argv: [apk, list, --installed, "{{ ci_host_kernel_package }}"]
+  register: ci_host_kernel_listed
+  check_mode: false
+  changed_when: false
+  when: ci_host_kernel_package | length > 0
+
+# defaults/main.yml parses either answer (ci_host_kernel_owned_by,
+# ci_host_kernel_listed_version).
+- name: Name the kernel package and its version
+  ansible.builtin.set_fact:
+    ci_host_kernel_pin: >-
+      {{ ci_host_kernel_owned_by if not ci_host_kernel_package
+         else [ci_host_kernel_package, ci_host_kernel_listed_version] }}
+
+- name: Check the kernel package
+  ansible.builtin.assert:
+    that:
+      - ci_host_kernel_pin is sequence and ci_host_kernel_pin is not string
+      - ci_host_kernel_pin | length == 2
+      - ci_host_kernel_pin[0] is match('^[A-Za-z0-9._+-]+$')
+      - ci_host_kernel_pin[1] is match('^[0-9][^-\s]*-r[0-9]+$')
+    fail_msg: >-
+      Could not tell which apk package holds the running kernel
+      ({{ ansible_facts.kernel }}): {{ ci_host_kernel_owner.stdout | default('')
+      }} {{ ci_host_kernel_listed.stdout | default('') }}. Set ci_2_kernel_package
+      to its name (README, Second CI host (ci-2)).
+    quiet: true
+
+# Replaces the package's line, pinned to another version or not, or adds it.
+- name: Pin the kernel package in /etc/apk/world
+  ansible.builtin.lineinfile:
+    path: /etc/apk/world
+    regexp: '^{{ ci_host_kernel_pin[0] | regex_escape }}([<>=~].*)?$'
+    line: "{{ ci_host_kernel_pin[0] }}={{ ci_host_kernel_pin[1] }}"
+  register: ci_host_kernel_pinned
+
+- name: Read /etc/apk/world
+  ansible.builtin.slurp:
+    src: /etc/apk/world
+  register: ci_host_apk_world
+
+# A check run that would add the pin has not written it.
+- name: Check that the kernel package is pinned
+  ansible.builtin.assert:
+    that:
+      - >-
+        (ci_host_kernel_pin[0] ~ '=' ~ ci_host_kernel_pin[1])
+        in (ci_host_apk_world.content | b64decode).splitlines()
+    fail_msg: >-
+      /etc/apk/world does not pin {{ ci_host_kernel_pin[0] }} to
+      {{ ci_host_kernel_pin[1] }}.
+    quiet: true
+  when: not (ansible_check_mode and ci_host_kernel_pinned is changed)

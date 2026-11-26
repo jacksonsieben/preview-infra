@@ -1,0 +1,73 @@
+---
+# Alpine's firewall (templates/preview-infra.nft.j2): never ufw, and never
+# `systemctl reload` or `restart nftables`. The distribution's
+# /etc/nftables.nft starts with `flush ruleset`, which would drop Docker's
+# and tailscaled's chains: only our own file is loaded, with nft -f, after
+# nft -c -f has checked it. At boot, /etc/nftables.nft includes it.
+
+- name: Check nft
+  ansible.builtin.stat:
+    path: /usr/sbin/nft
+    get_checksum: false
+  register: ci_host_nft_binary
+
+- name: Require nftables
+  ansible.builtin.assert:
+    that:
+      - ci_host_nft_binary.stat.exists
+      - ci_host_tailnet_interface in ansible_facts.interfaces
+      - ci_host_lan_cidr == '' or ci_host_lan_cidr is match('^[0-9.]+/[0-9]+$')
+    fail_msg: >-
+      {{ inventory_hostname }} needs nftables (/usr/sbin/nft) and the
+      {{ ci_host_tailnet_interface }} interface; ci_2_lan_cidr is empty or an
+      IPv4 network such as 192.168.1.0/24. The playbook installs no package
+      here (README, Second CI host (ci-2)).
+    quiet: true
+
+# At boot the nftables service loads /etc/nftables.nft after `flush ruleset`:
+# without its include of /etc/nftables.d, the rules would be gone after a
+# reboot. Only read; the file is the distribution's.
+- name: Read the boot firewall file
+  ansible.builtin.slurp:
+    src: /etc/nftables.nft
+  register: ci_host_nft_boot
+
+- name: Check that the boot firewall file includes /etc/nftables.d
+  ansible.builtin.assert:
+    that:
+      - >-
+        (ci_host_nft_boot.content | b64decode)
+        is search('(?m)^\\s*include\\s+"' ~ (ci_host_nft_file | dirname | regex_escape) ~ '/\\*\\.nft"')
+    fail_msg: >-
+      /etc/nftables.nft has no `include "{{ ci_host_nft_file | dirname }}/*.nft"`:
+      {{ ci_host_nft_file }} would not be loaded at boot. Add that line at its
+      end (README, Second CI host (ci-2)).
+    quiet: true
+
+- name: Create the nftables include directory
+  ansible.builtin.file:
+    path: "{{ ci_host_nft_file | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Write the firewall rules
+  ansible.builtin.template:
+    src: preview-infra.nft.j2
+    dest: "{{ ci_host_nft_file }}"
+    mode: "0644"
+    validate: /usr/sbin/nft -c -f %s
+  register: ci_host_nft_rules
+
+# read-only: nft list only prints the table.
+- name: Check that the firewall table is loaded
+  ansible.builtin.command: /usr/sbin/nft list table inet {{ ci_host_nft_table }}
+  register: ci_host_nft_loaded
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+# Replaces our table alone: the file declares, deletes and defines it.
+- name: Load the firewall rules
+  ansible.builtin.command: /usr/sbin/nft -f {{ ci_host_nft_file }}
+  when: ci_host_nft_rules is changed or ci_host_nft_loaded.rc != 0
+  changed_when: true
