@@ -30,6 +30,9 @@ services:
       - tmp:/tmp
 {% endif %}
     cgroup_parent: ${RUNNER_SLICE:-{{ github_runner_slice }}}
+{% if github_runner_dns %}
+    dns: [{{ github_runner_dns | join(', ') }}]
+{% endif %}
 {% if github_runner_docker %}
 
   # The job's Docker daemon. Builds, service containers and `container:` jobs
@@ -62,4 +65,14 @@ volumes:
   dind-sock:
   externals:
   tmp:
+{% endif %}
+{% if github_runner_bridge_prefix %}
+
+# A bridge named for the firewall's rules on jobs (ci_host). The job's Docker
+# daemon, when there is one, shares the runner's network, so its containers
+# go through this bridge too.
+networks:
+  default:
+    driver_opts:
+      com.docker.network.bridge.name: {{ github_runner_bridge_prefix }}${RUNNER_BRIDGE_ID:?}
 {% endif %}
