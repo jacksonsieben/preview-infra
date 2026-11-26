@@ -9,6 +9,14 @@ github_runner_image: ghcr.io/actions/actions-runner:latest
 github_runner_dind_image: docker:dind
 github_runner_update_schedule: "*-*-* 04:30"
 
+# A job's network: empty, compose's default bridge (br-<id>). Set, a bridge
+# named <prefix><8 hex digits> that ci_host's nftables rules keep to the
+# internet (README, Second CI host (ci-2)). At most 7 characters: a Linux
+# interface name has 15.
+github_runner_bridge_prefix: ""
+# The resolvers of a job's containers; empty, Docker's choice (the host's).
+github_runner_dns: []
+
 # The `runner` user and `docker` group inside github_runner_image.
 github_runner_uid: 1001
 github_runner_docker_gid: 123

@@ -583,6 +583,9 @@ against a stand-in for `docker`.
 `ansible-playbook tests/github_runner_settings.yml` checks the runner instance
 names, labels, slices and defaults, with and without `github_runners`, and `python3 tests/github_runner_job.py` runs
 `github-runner-job` against a fake GitHub API.
+`ansible-playbook tests/ci_host_settings.yml` checks the remote hosts' files,
+`ci-2`'s Alpine branch included, and `python3 tests/battery_guard.py` when
+the battery guard stops the runners and warns.
 `ansible-playbook tests/ci_previews_settings.yml` checks the routes, hosts and
 Traefik file of the previews on `ci-1`, `ansible-playbook
 tests/ci_previews_coolify.yml` that their Coolify settings go to `ci-1`'s
@@ -1472,6 +1475,166 @@ from `ci-1` (`docker ps -a --filter label=coolify.pullRequestId=<n>` and
    `previews-*` networks on `ci-1` (`docker network rm`), and the key `ci-1`
    in Coolify.
 
+## Second CI host (ci-2)
+
+`ci-2` is a second, smaller CI machine: ARM64, an Alpine-based distribution
+(musl, `apk`, systemd, nftables), with Docker and Tailscale already installed
+by hand. It runs **one** `ci-light` runner for private repositories, and
+nothing else: no previews and no Coolify. Its own play in `site.yml`
+(*Second CI host*, inventory group `ci_2`) applies the `ci_host` role's
+Alpine branch and the `github_runner` role. `ci-1`'s play is unchanged.
+
+The playbook **installs and upgrades nothing** there: no `apk upgrade`, no
+automatic updates, no Docker install. It never touches the kernel, `/boot`,
+`/etc/os-release` or `/etc/docker/daemon.json`; it only checks that Docker,
+`docker compose`, `bash` and nftables are there, and that Tailscale is logged
+in (never `tailscale up`, login, logout or a restart of `tailscaled`). Swap
+and memory-floor, made for a cloud VM, stay off (`ci_2_swap`,
+`ci_2_memory_floor`).
+
+The `ci_host` role tells the Alpine branch apart from the facts
+(`os_family: Alpine` or `pkg_mgr: apk`), or from `ID`/`ID_LIKE=alpine` in
+`/etc/os-release` for a distribution based on it.
+
+### What ci-2 lets in
+
+The firewall is a file of its own, `/etc/nftables.d/50-preview-infra.nft`,
+with a table of its own, `inet preview_infra`. Never ufw, never `flush
+ruleset` and never `systemctl reload` or `restart nftables`, so Docker's and
+`tailscaled`'s tables stay as they are. The file declares, deletes and
+defines its table again in one transaction; the playbook checks it with
+`nft -c -f` and loads it with `nft -f`. It works the same alone and at boot,
+when the nftables service loads the distribution's `/etc/nftables.nft`
+(`flush ruleset`, then `include "/etc/nftables.d/*.nft"`); the playbook
+checks that include and stops without it.
+
+| From | Port 22 (sshd) | A container's published port |
+| --- | --- | --- |
+| The tailnet (`tailscale0`) | open | open |
+| USB networking (`ci_2_usb_interface`, from `ci_2_usb_cidr`) | open | open |
+| The LAN (`ci_2_lan_cidr`, IPv4) | open | open, except from the Wi-Fi |
+| The Wi-Fi (`ci_2_wifi_interface`) outside the LAN | dropped | dropped (new connections) |
+| Anywhere else | dropped | Docker's own rules |
+
+sshd takes **keys only** (`PasswordAuthentication no`,
+`KbdInteractiveAuthentication no` in
+`/etc/ssh/sshd_config.d/00-preview-infra.conf`). The playbook checks the file
+with `sshd -t` (the binary may be `sshd.pam`), and the result with `sshd -T`,
+and reloads sshd, never restarts it.
+
+### What a job reaches
+
+A job's network is a bridge named `ghr-<8 hex digits>` (one per job,
+`github_runner_bridge_prefix`), so the same table holds rules for it:
+
+| A job's container to | |
+| --- | --- |
+| The internet (IPv4) | reached |
+| The LAN, its gateway and resolver | dropped |
+| The tailnet (`tailscale0`, 100.64.0.0/10) and Tailscale's resolver | dropped |
+| The host itself (any of its addresses) | dropped, replies to the job's own connections aside |
+| Another Docker network (10/8, 172.16/12, 192.168/16) | dropped |
+| The metadata address (169.254.169.254) and other link-local ones | dropped |
+| Anything over IPv6 | dropped |
+
+Since the LAN's resolver is out of reach, jobs resolve names through
+`ci_2_runner_dns` (public resolvers). After loading the rules, the playbook
+proves them: a `busybox` container on a `ghr-probe` network must fetch
+`http://example.com/` and must time out on the gateway, the host's LAN and
+tailnet addresses, Tailscale's resolver and the metadata address. The run
+fails otherwise. `ci-1`'s preview isolation is unchanged.
+
+### Set it up
+
+1. `ci-2` is on the tailnet and `ssh <user>@<ci-2>` works through it, with
+   your key. Docker runs, `docker compose version` and `bash --version` work.
+2. Find the battery's name: `ls /sys/class/power_supply` (`battery`, `BAT0`,
+   …). None: set `ci_2_battery: ""`.
+3. In `group_vars/all/local.yml` (this repository is public, so none of it
+   goes in git):
+
+   ```yaml
+   ci_2_address: <MagicDNS name or Tailscale address>
+   ci_2_user: <user>
+   ci_2_lan_cidr: <LAN, e.g. 192.168.1.0/24>
+   ci_2_battery: <name from step 2>
+   ci_2_runner_enabled: true
+   ci_2_runner_repos:
+     - <owner>/<private repo>
+   ```
+
+   The runner uses the same `github_runner_token` as the other hosts; give
+   it access to these repositories. ntfy warnings go to `ci_host_ntfy_topic`.
+4. Preview, then apply: `ansible-playbook site.yml --limit ci_2 --check --diff`,
+   then `ansible-playbook site.yml --limit ci_2`. While `ci_2_address` is
+   empty, the play skips `ci-2`.
+5. In the workflows: `runs-on: [self-hosted, ARM64, ci-light]`. ARM64 only:
+   no x86 job runs there.
+
+### The runner on ci-2
+
+One runner container on the host's Docker, one job at a time, label
+`ci-light`, within 4 GB of memory (`ci_2_runner_memory_max`). Like every
+runner here it gets no `docker.sock` of the host and serves private
+repositories only: the visibility check
+(`github_runner_visibility_check_seconds`) takes it down when a repository
+turns public ([Runner security](#runner-security)).
+
+### Docker in jobs on ci-2
+
+Off (`ci_2_runner_docker: false`). On `ci-1`, a job's Docker is a
+**privileged** Docker in Docker; a privileged container can change the host's
+firewall, which would undo the isolation above. Jobs that need a Docker
+daemon are those that:
+
+- build an image (`docker build`, `docker/setup-buildx-action`,
+  `docker/build-push-action`), save or load one (`docker save`/`load`);
+- run an image for a smoke test or an end-to-end test (`docker run`,
+  `docker compose up`);
+- declare `services:` or `container:` in the workflow.
+
+To list them in a repository:
+`grep -nE 'docker|buildx|services:|container:' .github/workflows/*.yml`.
+Lint, type checks, unit tests and builds without images need none.
+
+The options, none of them chosen here:
+
+| Option | Unprivileged? | On ci-2 |
+| --- | --- | --- |
+| Keep Docker jobs on `ci-1`'s labels, Docker-free ones on `ci-light` | yes | works today, nothing to change |
+| Rootless Docker in Docker (`docker:dind-rootless`) | no: the image still needs `--privileged` (or seccomp and AppArmor off) for its user namespaces | no gain over today's dind |
+| Sysbox (`runtime: sysbox-runc`) | yes | no package for Alpine, and it is registered in `/etc/docker/daemon.json`, which the playbook leaves alone |
+| Buildah or Podman in the job, unprivileged (`--isolation chroot`, vfs storage) | partly: builds work; running containers needs seccomp relaxed and `/dev/fuse` | the `docker/*` actions and `services:` do not work with it |
+| `ci_2_runner_docker: true` | no | works, but a job can then reach past the isolation above |
+
+The first one keeps the isolation and needs no change; turning on another is
+the operator's decision.
+
+### Battery guard
+
+`battery-guard.timer` reads `capacity` and `temp` in
+`/sys/class/power_supply/<ci_2_battery>/` every minute, read-only (the
+service sees `/sys` read-only, and never touches an existing battery or
+charging service). Above `ci_2_battery_max_temp` (42 °C), below
+`ci_2_battery_min_capacity` (25%), or when it cannot read the battery, it
+stops the runners (`systemctl stop github-runner@*.service`) and posts once
+to ntfy. They stay stopped until you start them again
+(`sudo systemctl start github-runner@<instance>`) or rerun the playbook.
+`journalctl -u battery-guard` shows each reading that stopped them.
+
+### Kernel pin
+
+The running kernel's package is pinned in `/etc/apk/world` (`<name>=<version>`,
+from `apk info --who-owns /lib/modules/$(uname -r)`), so no `apk upgrade`
+replaces it, and the playbook checks the pin. When that cannot tell the
+package, set `ci_2_kernel_package`. To upgrade the kernel on purpose, edit
+the line by hand, upgrade, reboot, and rerun the playbook to pin the new one.
+
+### When the tailnet is down on ci-2
+
+SSH still works from the LAN and over USB networking (`ci_2_lan_cidr`,
+`ci_2_usb_cidr`). Bring Tailscale back by hand from there.
+
 ## Retiring a runner
 
 A runner whose repository no longer sends it jobs still waits for one, with
@@ -1548,8 +1711,8 @@ redirects it to HTTPS.
 ```
 site.yml                         playbook: coolify, tailscale_dashboard, cloudflare_tunnel, preview_access, preview_cleanup, coolify_apps,
                                  github_runner, ci_previews (coolify.yml); then ci_host, github_runner and ci_previews on the
-                                 remote host
-inventory/hosts.yml              which machine is the preview host, and the remote host (ci)
+                                 remote host; then ci_host and github_runner on the second CI host (ci_2)
+inventory/hosts.yml              which machine is the preview host, the remote host (ci) and the second CI host (ci_2)
 group_vars/all/defaults.yml      every setting and its default
 group_vars/all/local.yml         your settings (not in git; template: local.example.yml)
 roles/coolify/                   runs Coolify's installer once, binds its ports to loopback, limits concurrent builds,
@@ -1564,17 +1727,21 @@ roles/coolify_apps/              the applications in coolify_apps, through Cooli
                                  and the environment variables of every app (tasks/env.yml)
 roles/github_runner/             optional GitHub Actions runners for private repositories, one container per job
 roles/ci_host/                   remote host base: ufw (tailnet only, DOCKER-USER), sshd, security updates, swap,
-                                 memory-floor (never idle for Oracle), the previews' network isolation (nftables), Docker
+                                 memory-floor (never idle for Oracle), the previews' network isolation (nftables), Docker;
+                                 on Alpine (ci-2): its own nftables table, the job isolation and its probe, kernel pin,
+                                 Docker check, battery guard
 roles/ci_previews/               PR previews on the remote host: Coolify's login, networks, its own tunnel, preview-access,
                                  preview-limit; and the remote server's settings in the preview host's Coolify (coolify.yml)
 tests/tunnel_routes.yml          offline check of the tunnel routes and DNS names
 tests/coolify_env.py             the coolify_apps role against a fake Coolify API
 tests/coolify_build_limit.yml    offline check of the build limit task
-tests/github_runner_settings.yml offline check of the runner instance names and defaults, and of ci-1's
-                                 runner settings in site.yml
+tests/github_runner_settings.yml offline check of the runner instance names and defaults, of ci-1's and ci-2's
+                                 runner settings in site.yml, and of the job network in compose.yml
 tests/github_runner_job.py       github-runner-job against a fake GitHub API
-tests/ci_host_settings.yml       offline check of the remote host's sshd, ufw, memory-floor and update files
+tests/ci_host_settings.yml       offline check of the remote host's sshd, ufw, memory-floor and update files, and of
+                                 ci-2's Alpine branch: sshd, nftables rules, job probe, kernel pin, battery guard
 tests/memory_floor.py            how much memory memory-floor holds, and its ntfy warning, on a fake host
+tests/battery_guard.py           when battery-guard stops the runners and warns, on a fake battery
 tests/preview_access.py          which requests preview-access lets through, with tokens signed by openssl
 tests/ci_previews_settings.yml   offline check of the remote host's preview routes, hosts, kept names and Traefik file
 tests/ci_previews_coolify.yml    the remote server's Coolify settings against a stand-in for docker

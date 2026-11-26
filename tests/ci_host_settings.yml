@@ -1,7 +1,8 @@
 ---
 # The ci_host role's settings and files: Oracle's InstanceServices rules as
 # they go into ufw, the sshd drop-in, memory-floor's ntfy URL and unit, and
-# the reboot window. Offline: nothing reaches a host, and
+# the reboot window; for ci-2's Alpine branch, how it is told apart, its sshd
+# drop-in, nftables rules, job probe, kernel pin and battery guard. Offline: nothing reaches a host, and
 # group_vars/all/local.yml is not read.
 #
 #   ansible-playbook tests/ci_host_settings.yml
@@ -143,3 +144,196 @@
           - iifname "pv-*" ip daddr { 169.254.169.254 } meta l4proto { tcp, udp } th dport 53 return
           - iifname "pv-*" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } drop
           - iifname "pv-*" meta nfproto ipv6 drop
+
+    # ci-1's drop-in, byte for byte as before the Alpine branch.
+    - name: Check that ci-1's sshd drop-in is unchanged
+      ansible.builtin.assert:
+        that:
+          - sshd_conf == expected
+        fail_msg: "{{ sshd_conf }}"
+      vars:
+        sshd_conf: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/sshd.conf.j2') }}"
+        expected: |
+          # Managed by Ansible (preview-infra). Local edits are overwritten.
+          #
+          # Keys only, no root, and only from tailnet addresses. A Match block at the
+          # end of sshd_config can still let a given network in (Coolify's, for one).
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PermitRootLogin no
+          PubkeyAuthentication yes
+          AllowUsers *@100.64.0.0/10 *@fd7a:115c:a1e0::/48
+
+# The Alpine branch (README, Second CI host (ci-2)), with facts and command
+# output shaped like an Alpine-based host's.
+- name: Second CI host settings
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/defaults.yml
+    - ../roles/ci_host/defaults/main.yml
+  vars:
+    inventory_hostname: ci-2
+    alpine_facts: {os_family: Alpine, pkg_mgr: apk, kernel: 6.6.31-0-lts}
+    ubuntu_facts: {os_family: Debian, pkg_mgr: apt, kernel: 6.8.0-1015-oracle}
+    # A distribution based on Alpine whose facts may not say so.
+    derived_os_release: |
+      NAME="Example OS"
+      ID=exampleos
+      ID_LIKE="alpine"
+      VERSION_ID=1.2
+  tasks:
+    - name: Check that the Alpine branch is told from the facts or os-release
+      ansible.builtin.assert:
+        that:
+          - item.alpine == (ci_host_alpine | bool)
+          - item.alpine != (ci_host_ssh_tailnet_only | bool)
+          - item.alpine != (ci_host_swap_enabled | bool)
+          - item.alpine != (ci_host_memory_floor_enabled | bool)
+          - ci_host_sshd_service == ('sshd' if item.alpine else 'ssh')
+        fail_msg: "{{ item.label }}: {{ ci_host_alpine }}, ids {{ ci_host_os_ids }}"
+      vars:
+        ansible_facts: "{{ item.facts }}"
+        ci_host_os_release: "{{ {'content': item.os_release | b64encode} if item.os_release else {'skipped': true} }}"
+      loop:
+        - {label: alpine facts, facts: "{{ alpine_facts }}", os_release: "", alpine: true}
+        - {label: ubuntu facts, facts: "{{ ubuntu_facts }}", os_release: "", alpine: false}
+        - {label: ID_LIKE=alpine, facts: {os_family: Exampleos, pkg_mgr: unknown}, os_release: "{{ derived_os_release }}", alpine: true}
+        - {label: ID=ubuntu, facts: {os_family: Debian, pkg_mgr: apt}, os_release: "ID=ubuntu\nID_LIKE=debian\n", alpine: false}
+      loop_control:
+        label: "{{ item.label }}"
+
+    - name: Check the Alpine sshd drop-in
+      ansible.builtin.assert:
+        that:
+          - "'PasswordAuthentication no' in lines"
+          - "'KbdInteractiveAuthentication no' in lines"
+          - sshd_conf is not search('AllowUsers')
+          - sshd_conf is match('(?s).*\n$')
+        fail_msg: "{{ sshd_conf }}"
+      vars:
+        ansible_facts: "{{ alpine_facts }}"
+        sshd_conf: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/sshd.conf.j2') }}"
+        lines: "{{ sshd_conf.splitlines() }}"
+
+    # sshd from the tailnet, USB and the LAN only; the Wi-Fi off the
+    # containers; jobs to the internet only.
+    - name: Check ci-2's firewall rules
+      ansible.builtin.assert:
+        that:
+          - nft is search('(?m)^table inet preview_infra\ndelete table inet preview_infra\n\ntable inet preview_infra \{$')
+          - rules | select('search', 'flush') | list == []
+          - rules | select('search', 'iifname|dport|daddr|nfproto') | list == expected
+        fail_msg: "{{ nft }}"
+      vars:
+        ansible_facts: "{{ alpine_facts }}"
+        ci_host_lan_cidr: 192.168.1.0/24
+        ci_host_job_bridge_prefix: ghr-
+        nft: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/preview-infra.nft.j2') }}"
+        rules: "{{ nft.splitlines() | map('trim') | reject('match', '#') | list }}"
+        expected:
+          - iifname "lo" accept
+          - iifname "ghr-*" ct state established,related accept
+          - iifname "ghr-*" drop
+          - tcp dport 22 iifname "tailscale0" accept
+          - tcp dport 22 iifname "usb0" ip saddr 172.16.42.0/24 accept
+          - tcp dport 22 ip saddr 192.168.1.0/24 accept
+          - tcp dport 22 drop
+          - iifname "wlan0" oifname "docker*" ct state new drop
+          - iifname "wlan0" oifname "br-*" ct state new drop
+          - iifname "wlan0" oifname "ghr-*" ct state new drop
+          - iifname "ghr-*" oifname "tailscale0" drop
+          - iifname "ghr-*" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } drop
+          - iifname "ghr-*" ip daddr 192.168.1.0/24 drop
+          - iifname "ghr-*" meta nfproto ipv6 drop
+
+    - name: Check ci-2's firewall rules without a LAN, USB or job rules
+      ansible.builtin.assert:
+        that:
+          - rules | select('search', 'iifname|dport|daddr|nfproto') | list == expected
+        fail_msg: "{{ rules }}"
+      vars:
+        ansible_facts: "{{ alpine_facts }}"
+        ci_host_usb_cidr: ""
+        nft: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/preview-infra.nft.j2') }}"
+        rules: "{{ nft.splitlines() | map('trim') | reject('match', '#') | list }}"
+        expected:
+          - iifname "lo" accept
+          - tcp dport 22 iifname "tailscale0" accept
+          - tcp dport 22 drop
+          - iifname "wlan0" oifname "docker*" ct state new drop
+          - iifname "wlan0" oifname "br-*" ct state new drop
+
+    - name: Check what the job probe tries to reach
+      ansible.builtin.assert:
+        that:
+          - ci_host_job_probe_blocked == expected
+        fail_msg: "{{ ci_host_job_probe_blocked }}"
+      vars:
+        ansible_facts:
+          default_ipv4: {gateway: 192.168.1.1, address: 192.168.1.20}
+        ci_host_tailnet_ips: {stdout_lines: [100.101.102.105, "fd7a:115c:a1e0::1"]}
+        expected:
+          - 192.168.1.1:80
+          - 192.168.1.20:22
+          - 100.101.102.105:22
+          - 100.100.100.100:80
+          - 169.254.169.254:80
+
+    - name: Check the kernel package read from apk
+      ansible.builtin.assert:
+        that:
+          - (ci_host_kernel_owned_by | default([], true) | list) == item.expected
+        fail_msg: "{{ item.stdout }}: {{ ci_host_kernel_owned_by }}"
+      vars:
+        ci_host_kernel_owner: {stdout: "{{ item.stdout }}"}
+      loop:
+        - stdout: /lib/modules/6.6.31-0-lts is owned by linux-lts-6.6.31-r0
+          expected: [linux-lts, 6.6.31-r0]
+        - stdout: /lib/modules/6.1.0-rpi is owned by linux-rpi-6.1.77_git20240212-r3
+          expected: [linux-rpi, 6.1.77_git20240212-r3]
+        - stdout: "ERROR: /lib/modules/6.6.31-0-lts: Could not find owner package"
+          expected: []
+      loop_control:
+        label: "{{ item.stdout }}"
+
+    - name: Check the version of a named kernel package
+      ansible.builtin.assert:
+        that:
+          - ci_host_kernel_listed_version == item.expected
+        fail_msg: "{{ ci_host_kernel_listed_version }}"
+      vars:
+        ci_host_kernel_package: linux-lts
+        ci_host_kernel_listed: {stdout: "{{ item.stdout }}"}
+      loop:
+        - stdout: "linux-lts-6.6.31-r0 aarch64 {linux-lts} (GPL-2.0-only) [installed]"
+          expected: 6.6.31-r0
+        - stdout: "linux-lts-doc-6.6.31-r0 noarch {linux-lts} (GPL-2.0-only) [installed]"
+          expected: ""
+        - stdout: ""
+          expected: ""
+      loop_control:
+        label: "{{ item.stdout }}"
+
+    - name: Check the battery guard unit
+      ansible.builtin.assert:
+        that:
+          - "'Environment=BATTERY_GUARD_DIR=/sys/class/power_supply/battery' in lines"
+          - "'Environment=BATTERY_GUARD_MAX_TEMP=42' in lines"
+          - "'Environment=BATTERY_GUARD_MIN_CAPACITY=25' in lines"
+          - "'Environment=BATTERY_GUARD_HOST=ci-2' in lines"
+          # /sys stays read-only to it.
+          - "'ProtectKernelTunables=yes' in lines"
+          - "'ProtectSystem=strict' in lines"
+          - unit is not search('ntfy')
+          - "'OnUnitActiveSec=60' in timer.splitlines()"
+          - env.splitlines()[-1] == 'BATTERY_GUARD_NTFY_URL=https://ntfy.sh/s3cret-topic'
+        fail_msg: "{{ unit }}"
+      vars:
+        ci_host_battery: battery
+        ci_host_ntfy_topic: s3cret-topic
+        unit: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/battery-guard.service.j2') }}"
+        lines: "{{ unit.splitlines() }}"
+        timer: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/battery-guard.timer.j2') }}"
+        env: "{{ lookup('ansible.builtin.template', '../roles/ci_host/templates/battery-guard.env.j2') }}"

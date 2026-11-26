@@ -340,6 +340,61 @@ ci_host_runner_memory_max: 8G
 ci_host_runner_min_free_disk_gb: 20
 
 # ---------------------------------------------------------------------------
+# Second CI host (ci-2)
+#
+# The machine in the `ci_2` group of inventory/hosts.yml (README, Second CI
+# host (ci-2)): an ARM64 machine on an Alpine-based distribution (musl, apk,
+# systemd, nftables) with Docker already installed, running one `ci-light`
+# runner. The playbook installs and upgrades nothing there and stays out of
+# Coolify. This repository is public, so its address, user, LAN and repos go
+# in local.yml. Empty address skips the host.
+# ---------------------------------------------------------------------------
+ci_2_address: ""
+ci_2_user: user
+
+# Port 22 is open to the tailnet, to USB networking and to this LAN (IPv4,
+# e.g. 192.168.1.0/24), and dropped from anywhere else. Empty: no LAN.
+ci_2_lan_cidr: ""
+ci_2_usb_interface: usb0
+ci_2_usb_cidr: 172.16.42.0/24
+# New connections from the Wi-Fi to a container's published port are dropped.
+ci_2_wifi_interface: wlan0
+
+# The apk package of the running kernel, pinned in /etc/apk/world. Empty: the
+# package that owns /lib/modules/<release>.
+ci_2_kernel_package: ""
+
+# Made for a cloud VM, off here: turn one on with true.
+ci_2_swap: false
+ci_2_memory_floor: false
+
+# The battery under /sys/class/power_supply (ls /sys/class/power_supply):
+# above ci_2_battery_max_temp °C or below ci_2_battery_min_capacity %, the
+# runner stops and ntfy (ci_host_ntfy_url, ci_host_ntfy_topic) is told. Empty
+# on a machine without a battery.
+ci_2_battery: battery
+ci_2_battery_max_temp: 42
+ci_2_battery_min_capacity: 25
+
+# One runner, one job at a time, for private repositories only. The
+# visibility check (github_runner_visibility_check_seconds) takes it down when
+# a repository turns public. Workflows pick it with
+# `runs-on: [self-hosted, ARM64, ci-light]`: arm64 only, no x86 job.
+ci_2_runner_enabled: false
+ci_2_runner_repos: []             # owner/name, private only
+ci_2_runner_labels: [self-hosted, linux, ARM64, ci-light]
+# The job's limits: no CPU limit (empty), 4 GB of memory.
+ci_2_runner_cpu_quota: ""
+ci_2_runner_memory_max: 4G
+ci_2_runner_min_free_disk_gb: 10
+# No Docker in jobs by default: the Docker in Docker of ci-1 is privileged
+# (README, Docker in jobs on ci-2).
+ci_2_runner_docker: false
+# A job reaches the internet only, so it resolves names through public
+# resolvers: the LAN's is out of its reach.
+ci_2_runner_dns: [1.1.1.1, 9.9.9.9]
+
+# ---------------------------------------------------------------------------
 # PR previews on ci-1 (README, Previews on ci-1)
 #
 # The Coolify of the preview host builds and runs the PR previews of some

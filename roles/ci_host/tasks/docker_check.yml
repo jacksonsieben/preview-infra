@@ -1,0 +1,70 @@
+---
+# Docker on Alpine is the operator's: never installed, configured or
+# restarted here (/etc/docker/daemon.json is left alone). Only checked:
+# github-runner-job needs the daemon and `docker compose`, and the runner
+# image's update script bash.
+
+# read-only: prints versions and a path.
+- name: Check that Docker, its compose plugin and bash are installed
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      command -v bash
+      docker version --format '{{ "{{" }} .Server.Version {{ "}}" }}'
+      docker compose version --short
+  register: ci_host_docker_version
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: Require Docker
+  ansible.builtin.assert:
+    that:
+      - ci_host_docker_version.rc == 0
+    fail_msg: >-
+      {{ inventory_hostname }} needs Docker running, `docker compose` and
+      bash; the playbook installs none of them here (README, Second CI host (ci-2)):
+      {{ ci_host_docker_version.stderr }}
+    quiet: true
+
+# A container on a network named like the jobs' tries each address that a
+# job must not reach, then the internet. The rules are loaded by now
+# (tasks/nftables.yml); in a check run they may not be, so it is skipped.
+- name: Check that a job reaches the internet only
+  ansible.builtin.command:
+    argv: >-
+      {{ ['sh', '-c', ci_host_job_probe_script, 'probe',
+          ci_host_job_bridge_prefix ~ 'probe', ci_host_job_probe_image,
+          ci_host_job_probe_internet, ci_host_job_dns | join(',')]
+         + ci_host_job_probe_blocked }}
+  vars:
+    ci_host_job_probe_script: |
+      set -u
+      net="${1:?}"; image="${2:?}"; internet="${3:?}"; dns="$4"; shift 4
+      # The jobs' resolvers (github_runner_dns): the LAN's is blocked.
+      dns_options=""
+      for server in $(echo "$dns" | tr , ' '); do dns_options="$dns_options --dns $server"; done
+      docker network rm "$net" >/dev/null 2>&1
+      docker network create -o "com.docker.network.bridge.name=$net" "$net" >/dev/null || exit 2
+      trap 'docker network rm "$net" >/dev/null 2>&1' EXIT
+      # busybox wget: "timed out" when a drop ate the packets; "refused" or
+      # an HTTP answer when they got there.
+      docker run --rm --network "$net" $dns_options "$image" sh -c '
+        fail=0
+        if wget -q -T 10 -O /dev/null "$0"; then echo "internet: reached"
+        else echo "internet: NOT reached"; fail=1; fi
+        for target in "$@"; do
+          out=$(wget -q -T 5 -O /dev/null "http://$target/" 2>&1); rc=$?
+          if [ $rc -ne 0 ] && echo "$out" | grep -q "timed out"; then
+            echo "$target: blocked"
+          else
+            echo "$target: REACHED ($out)"; fail=1
+          fi
+        done
+        exit $fail' "$internet" "$@"
+  register: ci_host_job_probe
+  changed_when: false
+  failed_when: ci_host_job_probe.rc != 0
+  when:
+    - ci_host_job_bridge_prefix | length > 0
+    - not ansible_check_mode

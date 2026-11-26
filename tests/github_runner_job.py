@@ -15,6 +15,7 @@ with its own labels and slice.
 """
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -35,7 +36,8 @@ import json, os, sys, time
 args = sys.argv[1:]
 with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
     log.write(json.dumps({"args": args, "jit": os.environ.get("ACTIONS_RUNNER_INPUT_JITCONFIG"),
-                          "slice": os.environ.get("RUNNER_SLICE")}) + "\n")
+                          "slice": os.environ.get("RUNNER_SLICE"),
+                          "bridge": os.environ.get("RUNNER_BRIDGE_ID")}) + "\n")
 marker = os.environ["FAKE_DOCKER_LOG"] + ".down"
 if args[:1] == ["info"]:
     print(os.environ["FAKE_DOCKER_ROOT"])
@@ -218,6 +220,9 @@ def main():
         check(TOKEN not in out and JIT not in out, "neither the token nor the config is printed", out)
         check({c["slice"] for c in job.docker() if "compose" in c["args"]} == {"github_runner.slice"},
               "its containers go into the shared slice")
+        bridges = {c["bridge"] for c in job.docker() if "compose" in c["args"]}
+        check(len(bridges) == 1 and re.fullmatch(r"[0-9a-f]{8}", next(iter(bridges)) or ""),
+              "its network's bridge gets one 8-digit id (RUNNER_BRIDGE_ID)", bridges)
 
         print("# 2. repositories that are not private")
         for instance, why in (("you-public-1", "is not private"), ("you-gone-1", "HTTP 404")):
@@ -313,6 +318,8 @@ def main():
               "registers on its repository with its own labels", out)
         check({c["slice"] for c in job.docker() if "compose" in c["args"]}
               == {"github_runner-you_private_light.slice"}, "its containers go into its own slice")
+        check({c["bridge"] for c in job.docker() if "compose" in c["args"]}.isdisjoint(bridges),
+              "and its network another bridge")
         check(os.path.isdir(os.path.join(job.data_dir, "you-private-light-1", "work"))
               and os.path.isdir(os.path.join(job.data_dir, "you-private-light-1", "tool-cache")),
               "it has its own work directory and tool cache")

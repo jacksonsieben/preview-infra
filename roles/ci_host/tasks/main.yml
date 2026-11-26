@@ -4,9 +4,19 @@
 # isolation of the PR previews' networks, and Docker for the GitHub Actions
 # runner and the previews.
 #
+# On Alpine (ci-2, README, Second CI host (ci-2)) the base is smaller and
+# touches less: an nftables table of its own, the sshd drop-in, the kernel
+# package pinned, and checks that Docker and Tailscale are already there. No
+# package is installed or upgraded, and no service but sshd is reloaded.
+#
 # The firewall and sshd accept the tailnet only, so the first tasks make sure
 # this very connection came through it: applied over any other path, the next
 # connection would be refused.
+
+- name: Read the distribution
+  ansible.builtin.slurp:
+    src: /etc/os-release
+  register: ci_host_os_release
 
 # read-only: tailscale status prints the state.
 - name: Read the state of Tailscale
@@ -57,36 +67,63 @@
       - (ci_host_ssh.stdout | from_json).client_in_tailnet
     fail_msg: >-
       Connect to {{ inventory_hostname }} through the tailnet: set
-      ci_host_address to its Tailscale address or MagicDNS name
+      {{ ci_host_address_setting }} to its Tailscale address or MagicDNS name
       ({{ ci_host_tailnet_ips.stdout_lines | join(', ') }}) and run the
       playbook from a machine on the tailnet. This connection:
       {{ ci_host_ssh.stdout }}. The firewall and sshd set up next would
       refuse any other path (README, Remote host (ci-1)).
     quiet: true
 
+# On Alpine, Tailscale is the operator's: only checked above.
 - name: Keep Tailscale on at boot
   ansible.builtin.systemd_service:
     name: tailscaled
     enabled: true
+  when: not ci_host_alpine | bool
 
 - name: Firewall
   ansible.builtin.import_tasks: firewall.yml
+  when: not ci_host_alpine | bool
+
+- name: Firewall (nftables)
+  ansible.builtin.import_tasks: nftables.yml
+  when: ci_host_alpine | bool
 
 - name: SSH
   ansible.builtin.import_tasks: sshd.yml
 
+# Alpine gets no automatic updates: its kernel package is pinned instead.
 - name: Security updates
   ansible.builtin.import_tasks: updates.yml
+  when: not ci_host_alpine | bool
+
+- name: Kernel package
+  ansible.builtin.import_tasks: kernel_pin.yml
+  when: ci_host_alpine | bool
 
 - name: Swap
   ansible.builtin.import_tasks: swap.yml
+  when: ci_host_swap_enabled | bool
 
 - name: Memory floor
   ansible.builtin.import_tasks: memory_floor.yml
+  when: ci_host_memory_floor_enabled | bool
 
 # Before Docker, so the previews' networks never run without it.
 - name: Preview network isolation
   ansible.builtin.import_tasks: preview_isolation.yml
+  when: not ci_host_alpine | bool
 
 - name: Docker
   ansible.builtin.import_tasks: docker.yml
+  when: not ci_host_alpine | bool
+
+# Alpine: Docker is the operator's, checked and never installed or
+# configured. Then a test container proves the job networks' rules.
+- name: Docker (check only)
+  ansible.builtin.import_tasks: docker_check.yml
+  when: ci_host_alpine | bool
+
+- name: Battery guard
+  ansible.builtin.import_tasks: battery.yml
+  when: ci_host_battery | length > 0

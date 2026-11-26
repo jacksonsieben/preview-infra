@@ -18,6 +18,7 @@
 # again. Settings: /etc/github-runner/config.json (written by the playbook) and
 # the token in /etc/github-runner/token; GITHUB_RUNNER_CONFIG_DIR points
 # elsewhere, for tests/github_runner_job.py.
+import hashlib
 import json
 import os
 import re
@@ -159,7 +160,10 @@ def main():
 
     project = "ghr-" + re.sub(r"[^a-z0-9_-]", "_", instance.lower())
     compose = ["docker", "compose", "--project-name", project, "--file", f"{CONFIG_DIR}/compose.yml"]
-    env = dict(os.environ, RUNNER_WORK=work, RUNNER_TOOL_CACHE_DIR=tool_cache, RUNNER_SLICE=cgroup_slice)
+    # The job network's bridge, when compose.yml names it: <prefix><id>.
+    bridge_id = hashlib.sha256(project.encode()).hexdigest()[:8]
+    env = dict(os.environ, RUNNER_WORK=work, RUNNER_TOOL_CACHE_DIR=tool_cache, RUNNER_SLICE=cgroup_slice,
+               RUNNER_BRIDGE_ID=bridge_id)
     down = compose + ["down", "--volumes", "--remove-orphans", "--timeout", "10"]
     # Leftovers of a job cut short (crash, power loss).
     subprocess.run(down, env=env, check=False)

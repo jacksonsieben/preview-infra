@@ -124,6 +124,19 @@ coolify_apps:
 #     cpu_quota: 50%
 #     memory_max: 2G
 
+# The second CI host (README, Second CI host (ci-2)): an ARM64 Alpine-based
+# machine with one ci-light runner. Its Tailscale address or MagicDNS name,
+# the user the playbook logs in as, the LAN that may reach its sshd, and the
+# battery's name under /sys/class/power_supply. Workflows use
+# `runs-on: [self-hosted, ARM64, ci-light]`. It warns on ci_host_ntfy_topic.
+# ci_2_address: 100.101.102.105
+# ci_2_user: user
+# ci_2_lan_cidr: 192.168.1.0/24
+# ci_2_battery: battery
+# ci_2_runner_enabled: true
+# ci_2_runner_repos:
+#   - your-user/private-repo
+
 # PR previews on ci-1 instead of here (README, Previews on ci-1). Coolify
 # here builds and runs them there; ci-1 publishes them through its own
 # tunnel. Production stays here: list what this host still serves on those

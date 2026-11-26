@@ -1,0 +1,30 @@
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# Stops the GitHub Actions runners above {{ ci_host_battery_max_temp }} °C or
+# below {{ ci_host_battery_min_capacity }}% of battery (README, Second CI host
+# (ci-2)). Reads /sys/class/power_supply/{{ ci_host_battery }} only: /sys is
+# read-only to it (ProtectKernelTunables).
+[Unit]
+Description=Stop the runners when the battery is too hot or too low
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/battery-guard
+EnvironmentFile=/etc/battery-guard.env
+Environment=BATTERY_GUARD_DIR=/sys/class/power_supply/{{ ci_host_battery }}
+Environment=BATTERY_GUARD_MAX_TEMP={{ ci_host_battery_max_temp }}
+Environment=BATTERY_GUARD_MIN_CAPACITY={{ ci_host_battery_min_capacity }}
+Environment=BATTERY_GUARD_HOST={{ inventory_hostname }}
+Environment=BATTERY_GUARD_STATE=/run/battery-guard/alerted
+RuntimeDirectory=battery-guard
+RuntimeDirectoryPreserve=yes
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

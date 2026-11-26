@@ -48,3 +48,92 @@ ci_host_swap_file: /swapfile
 # this size (MiB).
 ci_host_memory_floor_interval: 10
 ci_host_memory_floor_chunk_mb: 64
+
+# ---------------------------------------------------------------------------
+# Alpine (apk, musl, nftables): the second CI host, ci-2 (README, Second CI
+# host (ci-2)). Detected from the facts, or from ID / ID_LIKE in
+# /etc/os-release for a distribution based on Alpine.
+ci_host_os_ids: >-
+  {{ [] if ci_host_os_release is not defined or ci_host_os_release is skipped
+     else (ci_host_os_release.content | b64decode)
+     | regex_findall('(?m)^ID(?:_LIKE)?="?([^"\n]*)"?$') | join(' ') | split }}
+ci_host_alpine: >-
+  {{ ansible_facts.os_family | default('') == 'Alpine'
+     or ansible_facts.pkg_mgr | default('') == 'apk'
+     or 'alpine' in ci_host_os_ids }}
+
+# The setting that holds this host's address, for the error messages.
+ci_host_address_setting: ci_host_address
+
+# sshd's systemd service: ssh on Ubuntu, sshd elsewhere.
+ci_host_sshd_service: "{{ 'sshd' if ci_host_alpine else 'ssh' }}"
+# Ubuntu: sshd takes tailnet addresses only (AllowUsers) and no root. On
+# Alpine, sshd takes keys only, and the nftables rules choose who reaches
+# port 22: the tailnet, USB and the LAN.
+ci_host_ssh_tailnet_only: "{{ not ci_host_alpine }}"
+
+# Swap and memory-floor are for a cloud VM: off on Alpine unless turned on.
+ci_host_swap_enabled: "{{ not ci_host_alpine }}"
+ci_host_memory_floor_enabled: "{{ not ci_host_alpine }}"
+
+# Alpine's firewall: a table of our own in a file of our own, loaded with
+# nft -f, alone or by the distribution's /etc/nftables.nft at boot (which
+# includes /etc/nftables.d/*.nft after `flush ruleset`).
+ci_host_nft_file: /etc/nftables.d/50-preview-infra.nft
+ci_host_nft_table: preview_infra
+# Port 22 is open to the tailnet, to USB networking (its interface and
+# addresses) and to the LAN's IPv4 addresses; dropped from anywhere else.
+# Empty leaves that one out.
+ci_host_lan_cidr: ""
+ci_host_usb_interface: usb0
+ci_host_usb_cidr: 172.16.42.0/24
+# New connections from the Wi-Fi to a container (a published port) are
+# dropped.
+ci_host_wifi_interface: wlan0
+
+# The runners' job networks: bridges named <prefix><id> (github_runner's
+# github_runner_bridge_prefix). What a job sends reaches the internet only:
+# never the LAN, the tailnet, the host itself or a metadata address.
+# Empty: no rules for jobs (ci-1).
+ci_host_job_bridge_prefix: ""
+# Private, tailnet and link-local ranges; ci_host_lan_cidr gets a rule of its
+# own, since it may sit inside one of them.
+ci_host_job_blocked_v4: "{{ ci_host_preview_blocked_v4 }}"
+# Addresses a job must not reach, tried from a test container on a job
+# network after the rules are loaded: the LAN's gateway, the host's own LAN
+# and tailnet addresses, Tailscale's resolver and the metadata address. A
+# connection refused counts as reached.
+ci_host_job_probe_blocked: >-
+  {{ ([ansible_facts.default_ipv4.gateway ~ ':80'] if ansible_facts.default_ipv4.gateway is defined else [])
+     + ([ansible_facts.default_ipv4.address ~ ':22'] if ansible_facts.default_ipv4.address is defined else [])
+     + (ci_host_tailnet_ips.stdout_lines | default([]) | select('match', '^[0-9.]+$') | map('regex_replace', '$', ':22') | list)
+     + ['100.100.100.100:80', '169.254.169.254:80'] }}
+ci_host_job_probe_internet: http://example.com/
+# The resolvers the jobs use (github_runner_dns), public ones: the LAN's
+# resolver is out of a job's reach.
+ci_host_job_dns: []
+ci_host_job_probe_image: busybox:stable
+
+# The running kernel's package, pinned to its version in /etc/apk/world so
+# nothing upgrades it. Empty: the package that owns /lib/modules/<release>.
+ci_host_kernel_package: ""
+# [name, version] from `apk info --who-owns`: "<path> is owned by
+# <name>-<version>-r<n>", where the version starts with a digit after the
+# name's last dash. None when it says something else.
+ci_host_kernel_owned_by: >-
+  {{ ci_host_kernel_owner.stdout | default('')
+     | regex_search('is owned by (\S+)-([0-9][^-\s]*-r[0-9]+)\s*$', '\1', '\2', multiline=True) }}
+# The version of ci_host_kernel_package, from `apk list --installed <name>`:
+# "<name>-<version>-r<n> <arch> {<origin>} (<license>) [installed]".
+ci_host_kernel_listed_version: >-
+  {{ (ci_host_kernel_listed.stdout | default('')
+      | regex_search('^' ~ (ci_host_kernel_package | regex_escape) ~ '-([0-9][^-\s]*-r[0-9]+)\s', '\1', multiline=True)
+      | default([''], true)) | first }}
+
+# Battery guard: every minute, reads /sys/class/power_supply/<name>/capacity
+# and temp, and stops the runners above the temperature (°C) or below the
+# charge (%), with a warning to ntfy. Empty: no guard (ci-1).
+ci_host_battery: ""
+ci_host_battery_max_temp: 42
+ci_host_battery_min_capacity: 25
+ci_host_battery_interval: 60

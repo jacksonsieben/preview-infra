@@ -3,11 +3,17 @@
 # every address: bound to the Tailscale address, it would fail at boot when
 # it starts before tailscaled, and lock the host. ufw already drops port 22
 # on the public interface; AllowUsers is the second lock.
+#
+# On Alpine the drop-in only turns passwords off: the nftables rules let the
+# tailnet, USB and the LAN reach port 22 (tasks/nftables.yml). Its sshd may
+# be sshd.pam, which is the one to test the configuration with.
 
 # read-only: command -v prints a path.
 - name: Find sshd
   ansible.builtin.shell:
-    cmd: PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd
+    cmd: >-
+      {{ 'PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd.pam || PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd'
+         if ci_host_alpine | bool else 'PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sshd' }}
   register: ci_host_sshd
   check_mode: false
   changed_when: false
@@ -27,3 +33,24 @@
   ansible.builtin.command: "{{ ci_host_sshd.stdout }} -t"
   check_mode: false
   changed_when: false
+
+# read-only: sshd -T only prints the configuration in effect. After a check
+# run's template change it would still print the old one.
+- name: Read the sshd configuration in effect
+  ansible.builtin.command: "{{ ci_host_sshd.stdout }} -T"
+  register: ci_host_sshd_effective
+  check_mode: false
+  changed_when: false
+  when: ci_host_alpine | bool and not ansible_check_mode
+
+- name: Check that sshd takes keys only
+  ansible.builtin.assert:
+    that:
+      - "'passwordauthentication no' in ci_host_sshd_effective.stdout_lines"
+      - "'kbdinteractiveauthentication no' in ci_host_sshd_effective.stdout_lines"
+    fail_msg: >-
+      sshd on {{ inventory_hostname }} still takes passwords: does
+      /etc/ssh/sshd_config include /etc/ssh/sshd_config.d/*.conf before it
+      sets PasswordAuthentication or KbdInteractiveAuthentication?
+    quiet: true
+  when: ci_host_alpine | bool and not ansible_check_mode

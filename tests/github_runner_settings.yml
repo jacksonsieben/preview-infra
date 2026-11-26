@@ -192,3 +192,87 @@
           - "'ci-1' in ci_host_runner_labels"
           - ci_host_runners == []
         fail_msg: "Labels: {{ ci_host_runner_labels }}"
+
+    # The ci_2 play (README, Second CI host (ci-2)): one ci-light slot for
+    # private repositories, ARM64 only, no Docker in jobs unless turned on,
+    # and a job bridge that ci_host's firewall knows.
+    - name: Check the ci_2 play
+      ansible.builtin.assert:
+        that:
+          - ci_2_play.hosts == 'ci_2'
+          - ci_2_roles == ['ci_host', 'github_runner']
+          - runner.github_runner_instances == 1
+          - runner.github_runners == []
+          - runner.github_runner_scope == 'repo'
+          - runner.github_runner_org == ''
+          - runner.github_runner_bridge_prefix == ci_host.ci_host_job_bridge_prefix
+          - runner.github_runner_dns == ci_host.ci_host_job_dns
+          - runner.github_runner_docker is search('ci_2_runner_docker')
+          - not ci_2_runner_docker
+          - not ci_2_runner_enabled
+          - ci_2_address == ''
+          - ci_2_runner_repos == []
+          - ci_2_runner_memory_max == '4G'
+          - "'ci-light' in ci_2_runner_labels and 'ARM64' in ci_2_runner_labels"
+          - ci_2_runner_labels | map('lower') | intersect(['x64', 'x86', 'amd64']) == []
+          - ci_2_play.vars.ci_2_job_bridge_prefix is match('^[a-z][a-z0-9-]{0,6}$')
+          # ci-1's play is left as it was: ci-2 is not in its group.
+          - ci_play.hosts == 'ci'
+        fail_msg: "{{ ci_2_play | to_json }}"
+      vars:
+        plays: "{{ lookup('ansible.builtin.file', '../site.yml') | from_yaml }}"
+        ci_play: "{{ plays | selectattr('hosts', 'eq', 'ci') | first }}"
+        ci_2_play: "{{ plays | selectattr('hosts', 'eq', 'ci_2') | first }}"
+        ci_2_roles: "{{ ci_2_play.roles | map(attribute='role') | list }}"
+        runner: "{{ (ci_2_play.roles | selectattr('role', 'eq', 'github_runner') | first).vars }}"
+        ci_host: "{{ (ci_2_play.roles | selectattr('role', 'eq', 'ci_host') | first).vars }}"
+
+    - name: Check that ci-2 is in its own inventory group
+      ansible.builtin.assert:
+        that:
+          - "'ci-2' in inventory.all.children.ci_2.hosts"
+          - "'ci-2' not in (inventory.all.children.ci.hosts | default({}))"
+        fail_msg: "{{ inventory | to_json }}"
+      vars:
+        inventory: "{{ lookup('ansible.builtin.file', '../inventory/hosts.yml') | from_yaml }}"
+
+    # ci-1 and the preview host: no named bridge, no resolvers of its own.
+    - name: Render the compose file without job network settings
+      ansible.builtin.assert:
+        that:
+          - rendered is not search('networks:')
+          - rendered is not search('dns:')
+          - rendered is not search('RUNNER_BRIDGE_ID')
+        fail_msg: "{{ rendered }}"
+      vars:
+        rendered: "{{ lookup('ansible.builtin.template', '../roles/github_runner/templates/compose.yml.j2') }}"
+
+    - name: Render ci-2's compose file
+      ansible.builtin.assert:
+        that:
+          - parsed.services.runner.dns == ['1.1.1.1', '9.9.9.9']
+          - parsed.networks.default.driver_opts['com.docker.network.bridge.name'] == 'ghr-${RUNNER_BRIDGE_ID:?}'
+          - "'docker' not in parsed.services"
+          - parsed.volumes is not defined
+          - rendered is not search('docker.sock:/var/run/docker.sock')
+        fail_msg: "{{ rendered }}"
+      vars:
+        github_runner_docker: false
+        github_runner_bridge_prefix: ghr-
+        github_runner_dns: [1.1.1.1, 9.9.9.9]
+        rendered: "{{ lookup('ansible.builtin.template', '../roles/github_runner/templates/compose.yml.j2') }}"
+        parsed: "{{ rendered | from_yaml }}"
+
+    - name: Render ci-2's compose file with Docker in jobs
+      ansible.builtin.assert:
+        that:
+          - parsed.services.docker.network_mode == 'service:runner'
+          - parsed.volumes.keys() | list | length > 0
+          - parsed.networks.default.driver_opts['com.docker.network.bridge.name'] == 'ghr-${RUNNER_BRIDGE_ID:?}'
+        fail_msg: "{{ rendered }}"
+      vars:
+        github_runner_docker: true
+        github_runner_bridge_prefix: ghr-
+        github_runner_dns: [1.1.1.1]
+        rendered: "{{ lookup('ansible.builtin.template', '../roles/github_runner/templates/compose.yml.j2') }}"
+        parsed: "{{ rendered | from_yaml }}"

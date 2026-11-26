@@ -1,0 +1,53 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible (preview-infra). Local edits are overwritten.
+#
+# ci-2's firewall (README, Second CI host (ci-2)): who reaches sshd, the
+# containers' published ports kept off the Wi-Fi, and the runners' jobs kept
+# to the internet.
+#
+# A table of its own, never `flush ruleset`: Docker's and tailscaled's tables
+# stay as they are. The table is declared, deleted and defined again in one
+# transaction, so `nft -f` on this file replaces it whether it was loaded or
+# not, alone or included by /etc/nftables.nft at boot. Its drops are final
+# whatever the other tables accept; its accepts only end this table.
+table inet {{ ci_host_nft_table }}
+delete table inet {{ ci_host_nft_table }}
+
+table inet {{ ci_host_nft_table }} {
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		iifname "lo" accept
+{% if ci_host_job_bridge_prefix %}
+		# A job reaches nothing on the host itself.
+		iifname "{{ ci_host_job_bridge_prefix }}*" ct state established,related accept
+		iifname "{{ ci_host_job_bridge_prefix }}*" drop
+{% endif %}
+		# sshd: the tailnet, USB networking and the LAN (IPv4) only.
+		tcp dport 22 iifname "{{ ci_host_tailnet_interface }}" accept
+{% if ci_host_usb_interface and ci_host_usb_cidr %}
+		tcp dport 22 iifname "{{ ci_host_usb_interface }}" ip saddr {{ ci_host_usb_cidr }} accept
+{% endif %}
+{% if ci_host_lan_cidr %}
+		tcp dport 22 ip saddr {{ ci_host_lan_cidr }} accept
+{% endif %}
+		tcp dport 22 drop
+	}
+
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+		# Ports published by containers are not open on the Wi-Fi.
+		iifname "{{ ci_host_wifi_interface }}" oifname "docker*" ct state new drop
+		iifname "{{ ci_host_wifi_interface }}" oifname "br-*" ct state new drop
+{% if ci_host_job_bridge_prefix %}
+		iifname "{{ ci_host_wifi_interface }}" oifname "{{ ci_host_job_bridge_prefix }}*" ct state new drop
+		# A job reaches the internet only: not the tailnet, the LAN, another
+		# Docker network or a metadata address, and not over IPv6.
+		iifname "{{ ci_host_job_bridge_prefix }}*" oifname "{{ ci_host_tailnet_interface }}" drop
+		iifname "{{ ci_host_job_bridge_prefix }}*" ip daddr { {{ ci_host_job_blocked_v4 | join(', ') }} } drop
+{% if ci_host_lan_cidr %}
+		iifname "{{ ci_host_job_bridge_prefix }}*" ip daddr {{ ci_host_lan_cidr }} drop
+{% endif %}
+		iifname "{{ ci_host_job_bridge_prefix }}*" meta nfproto ipv6 drop
+{% endif %}
+	}
+}
