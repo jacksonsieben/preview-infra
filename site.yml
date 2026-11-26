@@ -86,3 +86,78 @@
     # their limits (README, Previews on ci-1). Takes them down when
     # ci_previews_enabled is false.
     - ci_previews
+
+# The second CI host (README, Second CI host (ci-2)): Alpine, nftables and the
+# Docker already there, one `ci-light` runner whose jobs reach the internet
+# only, and a battery guard. No previews and no Coolify. Run it alone with
+# --limit ci_2.
+- name: Second CI host
+  hosts: ci_2
+  become: true
+  gather_facts: false
+  vars:
+    # The prefix of the job networks' bridges: the firewall (ci_host) and the
+    # runner's compose file (github_runner) must agree.
+    ci_2_job_bridge_prefix: ghr-
+  pre_tasks:
+    - name: Skip the second CI host without an address
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} skipped: set ci_2_address in
+          group_vars/all/local.yml (README, Second CI host (ci-2)).
+      when: not ci_2_address
+
+    - name: Stop here without an address
+      ansible.builtin.meta: end_host
+      when: not ci_2_address
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+    # The runner's labels say ARM64, and the ci_host tasks for this host are
+    # Alpine's: anything else would get the wrong ones.
+    - name: Check that the host is ARM64 and Alpine-based
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.architecture == 'aarch64'
+          - ansible_facts.os_family == 'Alpine' or ansible_facts.pkg_mgr == 'apk'
+          - ci_2_runner_labels | map('lower') | intersect(['x64', 'x86', 'amd64']) | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }} is {{ ansible_facts.architecture }},
+          {{ ansible_facts.distribution }} ({{ ansible_facts.pkg_mgr }}): this
+          play is for an ARM64 Alpine-based machine, and its labels name no
+          x86 architecture (README, Second CI host (ci-2)).
+        quiet: true
+  roles:
+    - role: ci_host
+      vars:
+        ci_host_address_setting: ci_2_address
+        ci_host_lan_cidr: "{{ ci_2_lan_cidr }}"
+        ci_host_usb_interface: "{{ ci_2_usb_interface }}"
+        ci_host_usb_cidr: "{{ ci_2_usb_cidr }}"
+        ci_host_wifi_interface: "{{ ci_2_wifi_interface }}"
+        ci_host_kernel_package: "{{ ci_2_kernel_package }}"
+        ci_host_swap_enabled: "{{ ci_2_swap }}"
+        ci_host_memory_floor_enabled: "{{ ci_2_memory_floor }}"
+        ci_host_job_bridge_prefix: "{{ ci_2_job_bridge_prefix }}"
+        ci_host_job_dns: "{{ ci_2_runner_dns }}"
+        ci_host_battery: "{{ ci_2_battery }}"
+        ci_host_battery_max_temp: "{{ ci_2_battery_max_temp }}"
+        ci_host_battery_min_capacity: "{{ ci_2_battery_min_capacity }}"
+    # One slot for private repositories, no Docker in jobs unless turned on.
+    # Stops the runner when ci_2_runner_enabled is false.
+    - role: github_runner
+      vars:
+        github_runner_enabled: "{{ ci_2_runner_enabled }}"
+        github_runner_scope: repo
+        github_runner_repos: "{{ ci_2_runner_repos }}"
+        github_runner_org: ""
+        github_runner_instances: 1
+        github_runner_labels: "{{ ci_2_runner_labels }}"
+        github_runners: []
+        github_runner_cpu_quota: "{{ ci_2_runner_cpu_quota }}"
+        github_runner_memory_max: "{{ ci_2_runner_memory_max }}"
+        github_runner_min_free_disk_gb: "{{ ci_2_runner_min_free_disk_gb }}"
+        github_runner_docker: "{{ ci_2_runner_docker }}"
+        github_runner_bridge_prefix: "{{ ci_2_job_bridge_prefix }}"
+        github_runner_dns: "{{ ci_2_runner_dns }}"
